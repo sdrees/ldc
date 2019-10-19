@@ -12,18 +12,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_IR_IRAGGR_H
-#define LDC_IR_IRAGGR_H
+#pragma once
 
+#include "dmd/aggregate.h"
 #include "llvm/ADT/SmallVector.h"
 #include <map>
 #include <vector>
 
-// DMD forward declarations
 class StructInitializer;
 
 namespace llvm {
 class Constant;
+class DIType;
+class GlobalVariable;
 class StructType;
 }
 
@@ -46,6 +47,10 @@ struct IrAggr {
   /// Aggregate D type.
   Type *type = nullptr;
 
+  /// Composite type debug description. This is not only to cache, but also
+  /// used for resolving forward references.
+  llvm::DIType *diCompositeType = nullptr;
+
   //////////////////////////////////////////////////////////////////////////
 
   // Returns the static default initializer of a field.
@@ -65,6 +70,10 @@ struct IrAggr {
 
   /// Defines all interface vtbls.
   void defineInterfaceVtbls();
+
+  /// Whether to suppress the TypeInfo definition for the aggregate via
+  /// `-betterC`, no `object.TypeInfo`, or `pragma(LDC_no_typeinfo)`.
+  bool suppressTypeInfo() const;
 
   /// Create the __ClassZ/__InterfaceZ symbol lazily.
   llvm::GlobalVariable *getClassInfoSymbol();
@@ -164,5 +173,3 @@ private:
 
 IrAggr *getIrAggr(AggregateDeclaration *decl, bool create = false);
 bool isIrAggrCreated(AggregateDeclaration *decl);
-
-#endif

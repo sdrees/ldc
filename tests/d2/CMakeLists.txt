@@ -7,7 +7,7 @@ elseif(${ptr_size} MATCHES "^8$")
 endif()
 
 set(gdb_dflags "")
-if((${CMAKE_SYSTEM_NAME} MATCHES "Linux") AND (${LDC_LLVM_VER} GREATER 307))
+if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     execute_process(COMMAND gdb --version
                     COMMAND head -n 1
                     OUTPUT_VARIABLE GDB_VERSION
@@ -41,7 +41,7 @@ function(add_testsuite config_name required_flags gdbflags model)
         COMMAND ${GNU_MAKE_BIN} -k -C ${workingdir} RESULTS_DIR=${resultsdir}
                      REQUIRED_ARGS=${required_flags} DFLAGS=${dflags}
                      DMD=${LDMD_EXE_FULL} MODEL=${model} GDB_FLAGS=${gdbflags}
-                     quick
+                     ARGS= start_all_tests
     )
     set_tests_properties(${name} PROPERTIES DEPENDS clean-${name})
 endfunction()

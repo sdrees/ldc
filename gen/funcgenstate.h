@@ -12,8 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_FUNCGENSTATE_H
-#define LDC_GEN_FUNCGENSTATE_H
+#pragma once
 
 #include "gen/irstate.h"
 #include "gen/pgo_ASTbased.h"
@@ -201,63 +200,10 @@ public:
 
   /// Emits a call or invoke to the given callee, depending on whether there
   /// are catches/cleanups active or not.
-  template <typename T>
-  llvm::CallSite callOrInvoke(llvm::Value *callee, const T &args,
+  llvm::CallSite callOrInvoke(llvm::Value *callee,
+                              llvm::ArrayRef<llvm::Value *> args,
                               const char *name = "", bool isNothrow = false);
 
 private:
   IRState &irs;
 };
-
-template <typename T>
-llvm::CallSite FuncGenState::callOrInvoke(llvm::Value *callee, const T &args,
-                                          const char *name, bool isNothrow) {
-  // If this is a direct call, we might be able to use the callee attributes
-  // to our advantage.
-  llvm::Function *calleeFn = llvm::dyn_cast<llvm::Function>(callee);
-
-  // Ignore 'nothrow' if there are active catch blocks handling non-Exception
-  // Throwables.
-  if (isNothrow && scopes.isCatchingNonExceptions())
-    isNothrow = false;
-
-  // Intrinsics don't support invoking and 'nounwind' functions don't need it.
-  const bool doesNotThrow =
-      isNothrow ||
-      (calleeFn && (calleeFn->isIntrinsic() || calleeFn->doesNotThrow()));
-
-#if LDC_LLVM_VER >= 308
-  // calls inside a funclet must be annotated with its value
-  llvm::SmallVector<llvm::OperandBundleDef, 2> BundleList;
-#endif
-
-  if (doesNotThrow || scopes.empty()) {
-    llvm::CallInst *call = irs.ir->CreateCall(callee, args,
-#if LDC_LLVM_VER >= 308
-                                              BundleList,
-#endif
-                                              name);
-    if (calleeFn) {
-      call->setAttributes(calleeFn->getAttributes());
-    }
-    return call;
-  }
-
-  llvm::BasicBlock *landingPad = scopes.getLandingPad();
-
-  llvm::BasicBlock *postinvoke = irs.insertBB("postinvoke");
-  llvm::InvokeInst *invoke =
-      irs.ir->CreateInvoke(callee, postinvoke, landingPad, args,
-#if LDC_LLVM_VER >= 308
-                           BundleList,
-#endif
-                           name);
-  if (calleeFn) {
-    invoke->setAttributes(calleeFn->getAttributes());
-  }
-
-  irs.scope() = IRScope(postinvoke);
-  return invoke;
-}
-
-#endif

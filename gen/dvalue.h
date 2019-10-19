@@ -14,10 +14,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_DVALUE_H
-#define LDC_GEN_DVALUE_H
+#pragma once
 
-#include "root.h"
+#include "dmd/root/root.h"
 
 class Type;
 class Dsymbol;
@@ -118,6 +117,12 @@ public:
 
 /// Represents a D slice (dynamic array).
 class DSliceValue : public DRValue {
+  llvm::Value *const length = nullptr;
+  llvm::Value *const ptr = nullptr;
+
+  DSliceValue(Type *t, llvm::Value *pair, llvm::Value *length,
+              llvm::Value *ptr);
+
 public:
   DSliceValue(Type *t, llvm::Value *pair);
   DSliceValue(Type *t, llvm::Value *length, llvm::Value *ptr);
@@ -175,5 +180,3 @@ public:
 
 inline llvm::Value *DtoRVal(DValue *v) { return v->getRVal()->val; }
 llvm::Value *DtoLVal(DValue *v);
-
-#endif // LDC_GEN_DVALUE_H

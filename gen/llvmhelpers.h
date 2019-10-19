@@ -13,22 +13,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_LLVMHELPERS_H
-#define LDC_GEN_LLVMHELPERS_H
+#pragma once
 
+#include "dmd/mtype.h"
+#include "dmd/statement.h"
 #include "gen/dvalue.h"
 #include "gen/llvm.h"
 #include "ir/irfuncty.h"
-#include "mtype.h"
-#include "statement.h"
 
 struct IRState;
 
 // An arrayreference type with initializer_list support (C++11):
 template <class T> using ArrayParam = llvm::ArrayRef<T>;
-
-// Helper function because LLVM's isMusl wasn't around before 3.9.
-bool isMusl();
 
 llvm::LLVMContext& getGlobalContext();
 
@@ -123,7 +119,8 @@ DValue *DtoDeclarationExp(Dsymbol *declaration);
 LLValue *DtoRawVarDeclaration(VarDeclaration *var, LLValue *addr = nullptr);
 
 // initializer helpers
-LLConstant *DtoConstInitializer(Loc &loc, Type *type, Initializer *init);
+LLConstant *DtoConstInitializer(Loc &loc, Type *type,
+                                Initializer *init = nullptr);
 LLConstant *DtoConstExpInit(Loc &loc, Type *targetType, Expression *exp);
 
 // getting typeinfo of type, base=true casts to object.TypeInfo
@@ -257,10 +254,10 @@ llvm::GlobalVariable *declareGlobal(const Loc &loc, llvm::Module &module,
                                     bool isThreadLocal = false);
 
 /// Defines an existing LLVM global, i.e., sets the initial value and finalizes
-/// its linkage.
+/// its linkage and visibility.
 /// Asserts that a global isn't defined multiple times this way.
 void defineGlobal(llvm::GlobalVariable *global, llvm::Constant *init,
-                  Dsymbol *symbolForLinkage);
+                  Dsymbol *symbolForLinkageAndVisibility);
 
 /// Declares (if not already declared) & defines an LLVM global.
 llvm::GlobalVariable *defineGlobal(const Loc &loc, llvm::Module &module,
@@ -296,4 +293,4 @@ DValue *makeVarDValue(Type *type, VarDeclaration *vd,
 /// true; otherwise it just returns false.
 bool toInPlaceConstruction(DLValue *lhs, Expression *rhs);
 
-#endif
+std::string llvmTypeToString(LLType *type);

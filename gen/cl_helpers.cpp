@@ -8,9 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/cl_helpers.h"
-#include "mars.h"
-#include "rmem.h"
-#include "root.h"
+
+#include "dmd/errors.h"
+#include "dmd/root/rmem.h"
+#include "dmd/root/root.h"
 #include <algorithm>
 #include <cctype> // isupper, tolower
 #include <stdarg.h>
@@ -18,7 +19,7 @@
 
 namespace opts {
 
-char *dupPathString(llvm::StringRef src) {
+DString dupPathString(llvm::StringRef src) {
   const auto length = src.size();
   char *r = static_cast<char *>(mem.xmalloc(length + 1));
   memcpy(r, src.data(), length);
@@ -26,32 +27,26 @@ char *dupPathString(llvm::StringRef src) {
   std::replace(r, r + length, '/', '\\');
 #endif
   r[length] = '\0';
-  return r;
+  return {length, r};
 }
 
-void initFromPathString(const char *&dest, const cl::opt<std::string> &src) {
-  dest = nullptr;
+DString fromPathString(const cl::opt<std::string> &src) {
   if (src.getNumOccurrences() != 0) {
     if (src.empty()) {
-      error(Loc(), "Expected argument to '-%s'",
-#if LDC_LLVM_VER >= 308
-            src.ArgStr.str().c_str()
-#else
-            src.ArgStr
-#endif
-      );
+      error(Loc(), "Expected argument to '-%s'", src.ArgStr.str().c_str());
     }
-    dest = dupPathString(src);
+    return dupPathString(src);
   }
+  return {0, nullptr};
 }
 
-MultiSetter::MultiSetter(bool invert, bool *p, ...) {
+MultiSetter::MultiSetter(bool invert, CHECKENABLE *p, ...) {
   this->invert = invert;
   if (p) {
     locations.push_back(p);
     va_list va;
     va_start(va, p);
-    while ((p = va_arg(va, bool *))) {
+    while ((p = va_arg(va, CHECKENABLE *))) {
       locations.push_back(p);
     }
     va_end(va);
@@ -60,7 +55,7 @@ MultiSetter::MultiSetter(bool invert, bool *p, ...) {
 
 void MultiSetter::operator=(bool val) {
   for (auto &l : locations) {
-    *l = (val != invert);
+    *l = (val != invert) ? CHECKENABLEon : CHECKENABLEoff;
   }
 }
 

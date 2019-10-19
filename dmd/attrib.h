@@ -1,27 +1,19 @@
 
 /* Compiler implementation of the D programming language
- * Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * written by Walter Bright
  * http://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
  * http://www.boost.org/LICENSE_1_0.txt
- * https://github.com/dlang/dmd/blob/master/src/attrib.h
+ * https://github.com/dlang/dmd/blob/master/src/dmd/attrib.h
  */
 
-#ifndef DMD_ATTRIB_H
-#define DMD_ATTRIB_H
-
-#ifdef __DMC__
 #pragma once
-#endif /* __DMC__ */
 
+#include "root/port.h"
 #include "dsymbol.h"
 
 class Expression;
-class Statement;
-class LabelDsymbol;
-class Initializer;
-class Module;
 class Condition;
 class StaticForeach;
 
@@ -34,9 +26,6 @@ public:
 
     virtual Dsymbols *include(Scope *sc);
     int apply(Dsymbol_apply_ft_t fp, void *param);
-    static Scope *createNewScope(Scope *sc,
-        StorageClass newstc, LINK linkage, CPPMANGLE cppmangle, Prot protection,
-        int explicitProtection, AlignDeclaration *aligndecl, PINLINE inlining);
     virtual Scope *newScope(Scope *sc);
     void addMember(Scope *sc, ScopeDsymbol *sds);
     void setScope(Scope *sc);
@@ -77,7 +66,6 @@ public:
     Dsymbol *syntaxCopy(Dsymbol *s);
     Scope *newScope(Scope *sc);
     void setScope(Scope *sc);
-    const char *getMessage();
     void accept(Visitor *v) { v->visit(this); }
 };
 
@@ -97,6 +85,17 @@ class CPPMangleDeclaration : public AttribDeclaration
 {
 public:
     CPPMANGLE cppmangle;
+
+    Dsymbol *syntaxCopy(Dsymbol *s);
+    Scope *newScope(Scope *sc);
+    const char *toChars();
+    void accept(Visitor *v) { v->visit(this); }
+};
+
+class CPPNamespaceDeclaration : public AttribDeclaration
+{
+public:
+    Expression *exp;
 
     Dsymbol *syntaxCopy(Dsymbol *s);
     Scope *newScope(Scope *sc);
@@ -178,6 +177,7 @@ class StaticIfDeclaration : public ConditionalDeclaration
 public:
     ScopeDsymbol *scopesym;
     bool addisdone;
+    bool onStack;
 
     Dsymbol *syntaxCopy(Dsymbol *s);
     Dsymbols *include(Scope *sc);
@@ -222,7 +222,7 @@ public:
 class CompileDeclaration : public AttribDeclaration
 {
 public:
-    Expression *exp;
+    Expressions *exps;
 
     ScopeDsymbol *scopesym;
     bool compiled;
@@ -246,10 +246,7 @@ public:
     Dsymbol *syntaxCopy(Dsymbol *s);
     Scope *newScope(Scope *sc);
     void setScope(Scope *sc);
-    static Expressions *concat(Expressions *udas1, Expressions *udas2);
     Expressions *getAttributes();
     const char *kind() const;
     void accept(Visitor *v) { v->visit(this); }
 };
-
-#endif /* DMD_ATTRIB_H */

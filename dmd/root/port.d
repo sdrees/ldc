@@ -2,7 +2,7 @@
  * Compiler implementation of the D programming language
  * http://dlang.org
  *
- * Copyright: Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright: Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:   Walter Bright, http://www.digitalmars.com
  * License:   $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/root/port.d, root/_port.d)
@@ -17,6 +17,8 @@ import core.stdc.errno;
 import core.stdc.string;
 import core.stdc.stdio;
 import core.stdc.stdlib;
+
+nothrow @nogc:
 
 private extern (C)
 {
@@ -34,7 +36,9 @@ private extern (C)
 
 extern (C++) struct Port
 {
-    static int memicmp(const char* s1, const char* s2, size_t n)
+    nothrow @nogc:
+
+    static int memicmp(scope const char* s1, scope const char* s2, size_t n) pure
     {
         int result = 0;
 
@@ -54,7 +58,7 @@ extern (C++) struct Port
         return result;
     }
 
-    static char* strupr(char* s)
+    static char* strupr(char* s) pure
     {
         char* t = s;
 
@@ -67,7 +71,7 @@ extern (C++) struct Port
         return t;
     }
 
-    static bool isFloat32LiteralOutOfRange(const(char)* s)
+    static bool isFloat32LiteralOutOfRange(scope const(char)* s)
     {
       version (IN_LLVM)
       {
@@ -98,7 +102,7 @@ extern (C++) struct Port
       }
     }
 
-    static bool isFloat64LiteralOutOfRange(const(char)* s)
+    static bool isFloat64LiteralOutOfRange(scope const(char)* s)
     {
       version (IN_LLVM)
       {
@@ -130,7 +134,7 @@ extern (C++) struct Port
     }
 
     // Little endian
-    static void writelongLE(uint value, void* buffer)
+    static void writelongLE(uint value, scope void* buffer) pure
     {
         auto p = cast(ubyte*)buffer;
         p[3] = cast(ubyte)(value >> 24);
@@ -140,14 +144,14 @@ extern (C++) struct Port
     }
 
     // Little endian
-    static uint readlongLE(void* buffer)
+    static uint readlongLE(scope const void* buffer) pure
     {
-        auto p = cast(ubyte*)buffer;
+        auto p = cast(const ubyte*)buffer;
         return (((((p[3] << 8) | p[2]) << 8) | p[1]) << 8) | p[0];
     }
 
     // Big endian
-    static void writelongBE(uint value, void* buffer)
+    static void writelongBE(uint value, scope void* buffer) pure
     {
         auto p = cast(ubyte*)buffer;
         p[0] = cast(ubyte)(value >> 24);
@@ -157,55 +161,27 @@ extern (C++) struct Port
     }
 
     // Big endian
-    static uint readlongBE(void* buffer)
+    static uint readlongBE(scope const void* buffer) pure
     {
-        auto p = cast(ubyte*)buffer;
+        auto p = cast(const ubyte*)buffer;
         return (((((p[0] << 8) | p[1]) << 8) | p[2]) << 8) | p[3];
     }
 
     // Little endian
-    static uint readwordLE(void* buffer)
+    static uint readwordLE(scope const void* buffer) pure
     {
-        auto p = cast(ubyte*)buffer;
+        auto p = cast(const ubyte*)buffer;
         return (p[1] << 8) | p[0];
     }
 
     // Big endian
-    static uint readwordBE(void* buffer)
+    static uint readwordBE(scope const void* buffer) pure
     {
-        auto p = cast(ubyte*)buffer;
+        auto p = cast(const ubyte*)buffer;
         return (p[0] << 8) | p[1];
     }
 
-    version (IN_LLVM)
-    {
-        // LDC_FIXME: Move this into our C++ code, since only driver/gen is
-        // still using this.
-        static int stricmp(const(char)* s1, const(char)* s2)
-        {
-            int result = 0;
-            for (;;)
-            {
-                char c1 = *s1;
-                char c2 = *s2;
-
-                result = c1 - c2;
-                if (result)
-                {
-                    result = toupper(c1) - toupper(c2);
-                    if (result)
-                        break;
-                }
-                if (!c1)
-                    break;
-                s1++;
-                s2++;
-            }
-            return result;
-        }
-    }
-
-    static void valcpy(void *dst, ulong val, size_t size)
+    static void valcpy(scope void *dst, ulong val, size_t size) pure
     {
         switch (size)
         {

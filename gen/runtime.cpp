@@ -8,8 +8,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/runtime.h"
-#include "aggregate.h"
-#include "dsymbol.h"
+
+#include "dmd/aggregate.h"
+#include "dmd/dsymbol.h"
+#include "dmd/errors.h"
+#include "dmd/ldcbindings.h"
+#include "dmd/module.h"
+#include "dmd/mtype.h"
+#include "dmd/root/root.h"
+#include "dmd/tokens.h"
+#include "driver/cl_options_instrumentation.h"
 #include "gen/abi.h"
 #include "gen/attributes.h"
 #include "gen/functions.h"
@@ -22,24 +30,17 @@
 #include "ir/irfunction.h"
 #include "ir/irtype.h"
 #include "ir/irtypefunction.h"
-#include "driver/cl_options_instrumentation.h"
-#include "ldcbindings.h"
-#include "mars.h"
-#include "module.h"
-#include "mtype.h"
-#include "root.h"
-#include "tokens.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include <algorithm>
+
 #if LDC_LLVM_VER >= 400
 #include "llvm/Bitcode/BitcodeWriter.h"
 #else
 #include "llvm/Bitcode/ReaderWriter.h"
 #endif
-#include "llvm/IR/Attributes.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/MemoryBuffer.h"
-
-#include <algorithm>
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -68,7 +69,6 @@ static void checkForImplicitGCCall(const Loc &loc, const char *name) {
         "_aaValues",
         "_d_allocmemory",
         "_d_allocmemoryT",
-        "_d_array_cast_len",
         "_d_array_slice_copy",
         "_d_arrayappendT",
         "_d_arrayappendcTX",
@@ -253,11 +253,12 @@ struct LazyFunctionDeclarer {
       for (size_t i = 0, e = paramTypes.size(); i < e; ++i) {
         StorageClass stc = paramsSTC.empty() ? 0 : paramsSTC[i];
         Type *paramTy = paramTypes[i].get(loc);
-        params->push(Parameter::create(stc, paramTy, nullptr, nullptr));
+        params->push(
+            Parameter::create(stc, paramTy, nullptr, nullptr, nullptr));
       }
     }
     Type *returnTy = returnType.get(loc);
-    auto dty = TypeFunction::create(params, returnTy, 0, linkage);
+    auto dty = TypeFunction::create(params, returnTy, VARARGnone, linkage);
 
     // the call to DtoType performs many actions such as rewriting the function
     // type and storing it in dty
@@ -342,7 +343,12 @@ llvm::Function *getRuntimeFunction(const Loc &loc, llvm::Module &target,
   }
 
   LLFunction *resfn =
-      llvm::cast<llvm::Function>(target.getOrInsertFunction(name, fnty));
+      llvm::cast<llvm::Function>(target
+                                     .getOrInsertFunction(name, fnty)
+#if LDC_LLVM_VER >= 900
+                                     .getCallee()
+#endif
+      );
   resfn->setAttributes(fn->getAttributes());
   resfn->setCallingConv(fn->getCallingConv());
   return resfn;
@@ -359,30 +365,34 @@ llvm::Function *getRuntimeFunction(const Loc &loc, llvm::Module &target,
 //                            const char *funcname);
 // Musl:    void __assert_fail(const char *assertion, const char *filename, int line_num,
 //                             const char *funcname);
+// uClibc:  void __assert(const char *assertion, const char *filename, int linenumber,
+//                        const char *function);
 // else:    void __assert(const char *msg, const char *file, unsigned line)
 
 static const char *getCAssertFunctionName() {
-  if (global.params.targetTriple->isOSDarwin()) {
+  const auto &triple = *global.params.targetTriple;
+  if (triple.isOSDarwin()) {
     return "__assert_rtn";
-  } else if (global.params.targetTriple->isWindowsMSVCEnvironment()) {
+  } else if (triple.isWindowsMSVCEnvironment()) {
     return "_assert";
-  } else if (global.params.targetTriple->isOSSolaris()) {
+  } else if (triple.isOSSolaris()) {
     return "__assert_c99";
-  } else if (isMusl()) {
+  } else if (triple.isMusl()) {
     return "__assert_fail";
   }
   return "__assert";
 }
 
 static std::vector<PotentiallyLazyType> getCAssertFunctionParamTypes() {
+  const auto &triple = *global.params.targetTriple;
   const auto voidPtr = Type::tvoidptr;
   const auto uint = Type::tuns32;
 
-  if (global.params.targetTriple->isOSDarwin() ||
-      global.params.targetTriple->isOSSolaris() || isMusl()) {
+  if (triple.isOSDarwin() || triple.isOSSolaris() || triple.isMusl() ||
+      global.params.isUClibcEnvironment) {
     return {voidPtr, voidPtr, uint, voidPtr};
   }
-  if (global.params.targetTriple->getEnvironment() == llvm::Triple::Android) {
+  if (triple.getEnvironment() == llvm::Triple::Android) {
     return {voidPtr, uint, voidPtr};
   }
   return {voidPtr, voidPtr, uint};
@@ -400,7 +410,7 @@ llvm::Function *getCAssertFunction(const Loc &loc, llvm::Module &target) {
 // else:     void _Unwind_Resume(void*)
 
 static const char *getUnwindResumeFunctionName() {
-  auto &triple = *global.params.targetTriple;
+  const auto &triple = *global.params.targetTriple;
   if (triple.getArch() == llvm::Triple::arm)
     return triple.isOSDarwin() ? "_Unwind_SjLj_Resume" : "_d_eh_resume_unwind";
   return "_Unwind_Resume";
@@ -443,8 +453,8 @@ static Type *rt_dg1() {
     return dg_t;
 
   auto params = new Parameters();
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr));
-  auto fty = TypeFunction::create(params, Type::tint32, 0, LINKd);
+  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  auto fty = TypeFunction::create(params, Type::tint32, VARARGnone, LINKd);
   dg_t = createTypeDelegate(fty);
   return dg_t;
 }
@@ -456,9 +466,9 @@ static Type *rt_dg2() {
     return dg2_t;
 
   auto params = new Parameters();
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr));
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr));
-  auto fty = TypeFunction::create(params, Type::tint32, 0, LINKd);
+  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  auto fty = TypeFunction::create(params, Type::tint32, VARARGnone, LINKd);
   dg2_t = createTypeDelegate(fty);
   return dg2_t;
 }
@@ -558,10 +568,6 @@ static void buildRuntimeModule() {
   createFwdDecl(LINKc, voidTy, {"_d_assert_msg"}, {stringTy, stringTy, uintTy},
                 {}, Attr_Cold_NoReturn);
 
-  // void _d_switch_error(immutable(ModuleInfo)* m, uint line)
-  createFwdDecl(LINKc, voidTy, {"_d_switch_error"}, {moduleInfoPtrTy, uintTy},
-                {STCimmutable, 0}, Attr_Cold_NoReturn);
-
   //////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////
@@ -618,6 +624,10 @@ static void buildRuntimeModule() {
   createFwdDecl(LINKc, objectTy, {"_d_newclass", "_d_allocclass"},
                 {classInfoTy}, {STCconst}, Attr_NoAlias);
 
+  // Throwable _d_newThrowable(const ClassInfo ci)
+  createFwdDecl(LINKc, throwableTy, {"_d_newThrowable"}, {classInfoTy},
+                {STCconst}, Attr_NoAlias);
+
   // void* _d_newitemT (TypeInfo ti)
   // void* _d_newitemiT(TypeInfo ti)
   createFwdDecl(LINKc, voidPtrTy, {"_d_newitemT", "_d_newitemiT"}, {typeInfoTy},
@@ -648,9 +658,10 @@ static void buildRuntimeModule() {
 
   // array slice copy when assertions are on!
   // void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t
-  // srclen)
+  // srclen, size_t elemsz)
   createFwdDecl(LINKc, voidTy, {"_d_array_slice_copy"},
-                {voidPtrTy, sizeTy, voidPtrTy, sizeTy}, {}, Attr_1_3_NoCapture);
+                {voidPtrTy, sizeTy, voidPtrTy, sizeTy, sizeTy}, {},
+                Attr_1_3_NoCapture);
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -683,15 +694,6 @@ static void buildRuntimeModule() {
   STR_APPLY2(wstringTy, wc, wd)
   STR_APPLY2(dstringTy, dc, dw)
 #undef STR_APPLY2
-
-  //////////////////////////////////////////////////////////////////////////////
-  //////////////////////////////////////////////////////////////////////////////
-  //////////////////////////////////////////////////////////////////////////////
-
-  // fixes the length for dynamic array casts
-  // size_t _d_array_cast_len(size_t len, size_t elemsz, size_t newelemsz)
-  createFwdDecl(LINKc, sizeTy, {"_d_array_cast_len"}, {sizeTy, sizeTy, sizeTy},
-                {}, Attr_ReadNone);
 
   //////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////

@@ -11,10 +11,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_ARRAYS_H
-#define LDC_GEN_ARRAYS_H
+#pragma once
 
-#include "tokens.h"
+#include "dmd/tokens.h"
 #include "gen/llvm.h"
 
 class ArrayInitializer;
@@ -77,9 +76,6 @@ LLValue *DtoArrayEquals(Loc &loc, TOK op, DValue *l, DValue *r);
 
 LLValue *DtoDynArrayIs(TOK op, DValue *l, DValue *r);
 
-LLValue *DtoArrayCastLength(Loc &loc, LLValue *len, LLType *elemty,
-                            LLType *newelemty);
-
 LLValue *DtoArrayLen(DValue *v);
 LLValue *DtoArrayPtr(DValue *v);
 
@@ -91,5 +87,3 @@ void DtoIndexBoundsCheck(Loc &loc, DValue *arr, DValue *index);
 /// Inserts a call to the druntime function that throws the range error, with
 /// the given location.
 void DtoBoundsCheckFailCall(IRState *p, Loc &loc);
-
-#endif // LDC_GEN_ARRAYS_H

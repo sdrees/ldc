@@ -9,7 +9,7 @@
 
 #include "gen/optimizer.h"
 
-#include "errors.h"
+#include "dmd/errors.h"
 #include "gen/cl_helpers.h"
 #include "gen/logger.h"
 #include "gen/passes/Passes.h"
@@ -17,23 +17,33 @@
 #include "driver/cl_options_instrumentation.h"
 #include "driver/cl_options_sanitizers.h"
 #include "driver/targetmachine.h"
-#include "llvm/LinkAllPasses.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/LegacyPassNameParser.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/ADT/Triple.h"
-#if LDC_LLVM_VER >= 400
-#include "llvm/Analysis/InlineCost.h"
-#endif
-#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/Verifier.h"
-#include "llvm/Analysis/TargetLibraryInfo.h"
-#include "llvm/Target/TargetMachine.h"
+#include "llvm/LinkAllPasses.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/IR/LegacyPassNameParser.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#if LDC_LLVM_VER >= 400
+#include "llvm/Analysis/InlineCost.h"
+#endif
+#if LDC_LLVM_VER >= 800
+#include "llvm/Transforms/Instrumentation/MemorySanitizer.h"
+#include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
+#endif
+#if LDC_LLVM_VER >= 900
+#include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
+#endif
+#if LDC_LLVM_VER >= 1000
+#include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
+#endif
 
 extern llvm::TargetMachine *gTargetMachine;
 using namespace llvm;
@@ -86,8 +96,10 @@ static cl::opt<cl::boolOrDefault, false, opts::FlagParser<cl::boolOrDefault>>
         "cross-module-inlining", cl::ZeroOrMore, cl::Hidden,
         cl::desc("(*) Enable cross-module function inlining (default disabled)"));
 
+#if LDC_LLVM_VER < 900
 static cl::opt<bool> unitAtATime("unit-at-a-time", cl::desc("Enable basic IPO"),
                                  cl::ZeroOrMore, cl::init(true));
+#endif
 
 static cl::opt<bool> stripDebug(
     "strip-debug", cl::ZeroOrMore,
@@ -121,11 +133,20 @@ bool willCrossModuleInline() {
   return enableCrossModuleInlining == llvm::cl::BOU_TRUE;
 }
 
+#if LDC_LLVM_VER >= 800
+llvm::FramePointer::FP whichFramePointersToEmit() {
+  if (auto option = opts::framePointerUsage())
+    return *option;
+  return isOptimizationEnabled() ? llvm::FramePointer::None
+                                 : llvm::FramePointer::All;
+}
+#else
 bool willEliminateFramePointer() {
   const llvm::cl::boolOrDefault disableFPElimEnum = opts::disableFPElim();
   return disableFPElimEnum == llvm::cl::BOU_FALSE ||
          (disableFPElimEnum == llvm::cl::BOU_UNSET && isOptimizationEnabled());
 }
+#endif
 
 bool isOptimizationEnabled() { return optimizeLevel != 0; }
 
@@ -173,12 +194,20 @@ static void addGarbageCollect2StackPass(const PassManagerBuilder &builder,
 static void addAddressSanitizerPasses(const PassManagerBuilder &Builder,
                                       PassManagerBase &PM) {
   PM.add(createAddressSanitizerFunctionPass());
+#if LDC_LLVM_VER >= 900
+  PM.add(createModuleAddressSanitizerLegacyPassPass());
+#else
   PM.add(createAddressSanitizerModulePass());
+#endif
 }
 
 static void addMemorySanitizerPass(const PassManagerBuilder &Builder,
                                    PassManagerBase &PM) {
+#if LDC_LLVM_VER >= 800
+  PM.add(createMemorySanitizerLegacyPassPass());
+#else
   PM.add(createMemorySanitizerPass());
+#endif
 
   // MemorySanitizer inserts complex instrumentation that mostly follows
   // the logic of the original code, but operates on "shadow" values.
@@ -195,14 +224,23 @@ static void addMemorySanitizerPass(const PassManagerBuilder &Builder,
 
 static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
                                    PassManagerBase &PM) {
+#if LDC_LLVM_VER >= 800
+  PM.add(createThreadSanitizerLegacyPassPass());
+#else
   PM.add(createThreadSanitizerPass());
+#endif
 }
 
 static void addSanitizerCoveragePass(const PassManagerBuilder &Builder,
                                      legacy::PassManagerBase &PM) {
 #ifdef ENABLE_COVERAGE_SANITIZER
+#if LDC_LLVM_VER >= 1000
+  PM.add(createModuleSanitizerCoverageLegacyPassPass(
+      opts::getSanitizerCoverageOptions()));
+#else
   PM.add(
       createSanitizerCoverageModulePass(opts::getSanitizerCoverageOptions()));
+#endif
 #endif
 }
 
@@ -214,11 +252,7 @@ static void addPGOPasses(PassManagerBuilder &builder,
     options.NoRedZone = global.params.disableRedZone;
     if (global.params.datafileInstrProf)
       options.InstrProfileOutput = global.params.datafileInstrProf;
-#if LDC_LLVM_VER >= 309
     mpm.add(createInstrProfilingLegacyPass(options));
-#else
-    mpm.add(createInstrProfilingPass(options));
-#endif
   } else if (opts::isUsingASTBasedPGOProfile()) {
 // We are generating code with PGO profile information available.
 #if LDC_LLVM_VER >= 500
@@ -228,7 +262,6 @@ static void addPGOPasses(PassManagerBuilder &builder,
     }
 #endif
   }
-#if LDC_LLVM_VER >= 309
   else if (opts::isInstrumentingForIRBasedPGO()) {
 #if LDC_LLVM_VER >= 400
     builder.EnablePGOInstrGen = true;
@@ -237,7 +270,6 @@ static void addPGOPasses(PassManagerBuilder &builder,
   } else if (opts::isUsingIRBasedPGOProfile()) {
     builder.PGOInstrUse = global.params.datafileInstrProf;
   }
-#endif
 }
 
 /**
@@ -257,10 +289,8 @@ static void addOptimizationPasses(legacy::PassManagerBase &mpm,
   PassManagerBuilder builder;
   builder.OptLevel = optLevel;
   builder.SizeLevel = sizeLevel;
-#if LDC_LLVM_VER >= 309
   builder.PrepareForLTO = opts::isUsingLTO();
   builder.PrepareForThinLTO = opts::isUsingThinLTO();
-#endif
 
   if (willInline()) {
 #if LDC_LLVM_VER >= 400
@@ -276,7 +306,9 @@ static void addOptimizationPasses(legacy::PassManagerBase &mpm,
     builder.Inliner = createAlwaysInlinerPass();
 #endif
   }
+#if LDC_LLVM_VER < 900
   builder.DisableUnitAtATime = !unitAtATime;
+#endif
   builder.DisableUnrollLoops = optLevel == 0;
 
   builder.DisableUnrollLoops = (disableLoopUnrolling.getNumOccurrences() > 0)
@@ -439,7 +471,9 @@ void outputOptimizationSettings(llvm::raw_ostream &hash_os) {
   hash_os << disableSimplifyDruntimeCalls;
   hash_os << disableSimplifyLibCalls;
   hash_os << disableGCToStack;
+#if LDC_LLVM_VER < 900
   hash_os << unitAtATime;
+#endif
   hash_os << stripDebug;
   hash_os << disableLoopUnrolling;
   hash_os << disableLoopVectorization;

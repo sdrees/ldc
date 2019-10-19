@@ -2,7 +2,7 @@
  * Compiler implementation of the
  * $(LINK2 http://www.dlang.org, D programming language).
  *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/cond.d, _cond.d)
@@ -14,6 +14,7 @@ module dmd.cond;
 
 import core.stdc.string;
 import dmd.arraytypes;
+import dmd.ast_node;
 import dmd.dmodule;
 import dmd.dscope;
 import dmd.dsymbol;
@@ -36,13 +37,19 @@ import dmd.func;
 
 /***********************************************************
  */
-extern (C++) abstract class Condition : RootObject
+
+enum Include
+{
+    notComputed,        /// not computed yet
+    yes,                /// include the conditional code
+    no,                 /// do not include the conditional code
+}
+
+extern (C++) abstract class Condition : ASTNode
 {
     Loc loc;
-    // 0: not computed yet
-    // 1: include
-    // 2: do not include
-    int inc;
+
+    Include inc;
 
     override final DYNCAST dyncast() const
     {
@@ -58,12 +65,17 @@ extern (C++) abstract class Condition : RootObject
 
     abstract int include(Scope* sc);
 
-    DebugCondition isDebugCondition()
+    inout(DebugCondition) isDebugCondition() inout
     {
         return null;
     }
 
-    void accept(Visitor v)
+    inout(VersionCondition) isVersionCondition() inout
+    {
+        return null;
+    }
+
+    override void accept(Visitor v)
     {
         v.visit(this);
     }
@@ -102,12 +114,9 @@ extern (C++) final class StaticForeach : RootObject
     bool needExpansion = false;
 
     extern (D) this(const ref Loc loc,ForeachStatement aggrfe,ForeachRangeStatement rangefe)
-    in
     {
         assert(!!aggrfe ^ !!rangefe);
-    }
-    body
-    {
+
         this.loc = loc;
         this.aggrfe = aggrfe;
         this.rangefe = rangefe;
@@ -169,7 +178,7 @@ extern (C++) final class StaticForeach : RootObject
      */
     private extern(D) Expression wrapAndCall(const ref Loc loc, Statement s)
     {
-        auto tf = new TypeFunction(new Parameters(), null, 0, LINK.default_, 0);
+        auto tf = new TypeFunction(ParameterList(), null, LINK.default_, 0);
         auto fd = new FuncLiteralDeclaration(loc, loc, tf, TOK.reserved, null);
         fd.fbody = s;
         auto fe = new FuncExp(loc, fd);
@@ -291,7 +300,7 @@ extern (C++) final class StaticForeach : RootObject
             foreach (params; pparams)
             {
                 auto p = aggrfe ? (*aggrfe.parameters)[i] : rangefe.prm;
-                params.push(new Parameter(p.storageClass, p.type, p.ident, null));
+                params.push(new Parameter(p.storageClass, p.type, p.ident, null, null));
             }
         }
         Expression[2] res;
@@ -307,11 +316,11 @@ extern (C++) final class StaticForeach : RootObject
         {
             foreach (i; 0 .. 2)
             {
-                auto e = new Expressions();
-                foreach (j; 0 .. pparams[0].dim)
+                auto e = new Expressions(pparams[0].dim);
+                foreach (j, ref elem; *e)
                 {
                     auto p = (*pparams[i])[j];
-                    e.push(new IdentifierExp(aloc, p.ident));
+                    elem = new IdentifierExp(aloc, p.ident);
                 }
                 if (!tplty)
                 {
@@ -372,13 +381,10 @@ extern (C++) final class StaticForeach : RootObject
      * to finally expand the `static foreach` using
      * `dmd.statementsem.makeTupleForeach`.
      */
-    final extern(D) void prepare(Scope* sc)
-    in
+    extern(D) void prepare(Scope* sc)
     {
         assert(sc);
-    }
-    body
-    {
+
         if (aggrfe)
         {
             sc = sc.startCTFE();
@@ -414,9 +420,9 @@ extern (C++) final class StaticForeach : RootObject
      * Returns:
      *     `true` iff ready to call `dmd.statementsem.makeTupleForeach`.
      */
-    final extern(D) bool ready()
+    extern(D) bool ready()
     {
-        return aggrfe && aggrfe.aggr && aggrfe.aggr.type.toBasetype().ty == Ttuple;
+        return aggrfe && aggrfe.aggr && aggrfe.aggr.type && aggrfe.aggr.type.toBasetype().ty == Ttuple;
     }
 }
 
@@ -502,19 +508,19 @@ extern (C++) final class DebugCondition : DVCondition
     override int include(Scope* sc)
     {
         //printf("DebugCondition::include() level = %d, debuglevel = %d\n", level, global.params.debuglevel);
-        if (inc == 0)
+        if (inc == Include.notComputed)
         {
-            inc = 2;
+            inc = Include.no;
             bool definedInModule = false;
             if (ident)
             {
                 if (findCondition(mod.debugids, ident))
                 {
-                    inc = 1;
+                    inc = Include.yes;
                     definedInModule = true;
                 }
                 else if (findCondition(global.debugids, ident))
-                    inc = 1;
+                    inc = Include.yes;
                 else
                 {
                     if (!mod.debugidsNot)
@@ -523,14 +529,14 @@ extern (C++) final class DebugCondition : DVCondition
                 }
             }
             else if (level <= global.params.debuglevel || level <= mod.debuglevel)
-                inc = 1;
+                inc = Include.yes;
             if (!definedInModule)
                 printDepsConditional(sc, this, "depsDebug ");
         }
-        return (inc == 1);
+        return (inc == Include.yes);
     }
 
-    override DebugCondition isDebugCondition()
+    override inout(DebugCondition) isDebugCondition() inout
     {
         return this;
     }
@@ -659,6 +665,11 @@ extern (C++) final class VersionCondition : DVCondition
             case "CRuntime_Microsoft":
             case "CRuntime_Musl":
             case "CRuntime_UClibc":
+            case "CppRuntime_Clang":
+            case "CppRuntime_DigitalMars":
+            case "CppRuntime_Gcc":
+            case "CppRuntime_Microsoft":
+            case "CppRuntime_Sun":
             case "unittest":
             case "assert":
             case "all":
@@ -769,19 +780,19 @@ extern (C++) final class VersionCondition : DVCondition
     {
         //printf("VersionCondition::include() level = %d, versionlevel = %d\n", level, global.params.versionlevel);
         //if (ident) printf("\tident = '%s'\n", ident.toChars());
-        if (inc == 0)
+        if (inc == Include.notComputed)
         {
-            inc = 2;
+            inc = Include.no;
             bool definedInModule = false;
             if (ident)
             {
                 if (findCondition(mod.versionids, ident))
                 {
-                    inc = 1;
+                    inc = Include.yes;
                     definedInModule = true;
                 }
                 else if (findCondition(global.versionids, ident))
-                    inc = 1;
+                    inc = Include.yes;
                 else
                 {
                     if (!mod.versionidsNot)
@@ -790,14 +801,19 @@ extern (C++) final class VersionCondition : DVCondition
                 }
             }
             else if (level <= global.params.versionlevel || level <= mod.versionlevel)
-                inc = 1;
+                inc = Include.yes;
             if (!definedInModule &&
                 (!ident || (!isReserved(ident.toString()) && ident != Id._unittest && ident != Id._assert)))
             {
                 printDepsConditional(sc, this, "depsVersion ");
             }
         }
-        return (inc == 1);
+        return (inc == Include.yes);
+    }
+
+    override inout(VersionCondition) isVersionCondition() inout
+    {
+        return this;
     }
 
     override void accept(Visitor v)
@@ -816,7 +832,6 @@ extern (C++) final class VersionCondition : DVCondition
 extern (C++) final class StaticIfCondition : Condition
 {
     Expression exp;
-    int nest;           // limit circular dependencies
 
     extern (D) this(const ref Loc loc, Expression exp)
     {
@@ -836,44 +851,35 @@ extern (C++) final class StaticIfCondition : Condition
         int errorReturn()
         {
             if (!global.gag)
-                inc = 2; // so we don't see the error message again
+                inc = Include.no; // so we don't see the error message again
             return 0;
         }
 
-        if (inc == 0)
+        if (inc == Include.notComputed)
         {
-            if (exp.op == TOK.error || nest > 100)
-            {
-                error(loc, (nest > 1000) ? "unresolvable circular `static if` expression" : "error evaluating `static if` expression");
-                return errorReturn();
-            }
             if (!sc)
             {
                 error(loc, "`static if` conditional cannot be at global scope");
-                inc = 2;
+                inc = Include.no;
                 return 0;
             }
-
-            ++nest;
-            sc = sc.push(sc.scopesym);
 
             import dmd.staticcond;
             bool errors;
             bool result = evalStaticCondition(sc, exp, exp, errors);
-            sc.pop();
-            --nest;
+
             // Prevent repeated condition evaluation.
             // See: fail_compilation/fail7815.d
-            if (inc != 0)
-                return (inc == 1);
+            if (inc != Include.notComputed)
+                return (inc == Include.yes);
             if (errors)
                 return errorReturn();
             if (result)
-                inc = 1;
+                inc = Include.yes;
             else
-                inc = 2;
+                inc = Include.no;
         }
-        return (inc == 1);
+        return (inc == Include.yes);
     }
 
     override void accept(Visitor v)

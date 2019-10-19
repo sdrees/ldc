@@ -7,19 +7,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "gen/llvm.h"
-#include "aggregate.h"
-#include "declaration.h"
-#include "init.h"
-#include "mtype.h"
-#include "target.h"
+#include "ir/iraggr.h"
+
+#include "dmd/aggregate.h"
+#include "dmd/declaration.h"
+#include "dmd/expression.h"
+#include "dmd/init.h"
+#include "dmd/mtype.h"
+#include "dmd/target.h"
 #include "gen/irstate.h"
+#include "gen/llvm.h"
 #include "gen/llvmhelpers.h"
 #include "gen/logger.h"
 #include "gen/mangling.h"
 #include "gen/tollvm.h"
-#include "ir/iraggr.h"
-#include "irdsymbol.h"
+#include "ir/irdsymbol.h"
 #include "ir/irtypeclass.h"
 #include "ir/irtypestruct.h"
 #include <algorithm>
@@ -51,7 +53,7 @@ LLConstant *&IrAggr::getInitSymbol() {
 
   auto initGlobal = declareGlobal(aggrdecl->loc, gIR->module, getLLStructType(),
                                   irMangle, /*isConstant=*/true);
-  initGlobal->setAlignment(DtoAlignment(type));
+  initGlobal->setAlignment(LLMaybeAlign(DtoAlignment(type)));
 
   init = initGlobal;
 
@@ -107,8 +109,7 @@ LLConstant *IrAggr::getDefaultInitializer(VarDeclaration *field) {
     return DtoConstInitializer(field->_init->loc, field->type, field->_init);
   }
 
-  return DtoConstExpInit(field->loc, field->type,
-                         field->type->defaultInit(field->loc));
+  return DtoConstInitializer(field->loc, field->type);
 }
 
 // return a constant array of type arrTypeD initialized with a constant value,
@@ -145,12 +146,12 @@ IrAggr::createInitializerConstant(const VarInitMap &explicitInitializers) {
   if (type->ty == Tclass) {
     // add vtbl
     constants.push_back(getVtblSymbol());
-    offset += Target::ptrsize;
+    offset += target.ptrsize;
 
     // add monitor (except for C++ classes)
     if (!aggrdecl->isClassDeclaration()->isCPPclass()) {
       constants.push_back(getNullValue(getVoidPtrType()));
-      offset += Target::ptrsize;
+      offset += target.ptrsize;
     }
   }
 
@@ -209,7 +210,7 @@ void IrAggr::addFieldInitializers(
     if (cd->vtblInterfaces && cd->vtblInterfaces->dim > 0) {
       // Align interface infos to pointer size.
       unsigned aligned =
-          (offset + Target::ptrsize - 1) & ~(Target::ptrsize - 1);
+          (offset + target.ptrsize - 1) & ~(target.ptrsize - 1);
       if (offset < aligned) {
         add_zeros(constants, offset, aligned);
         offset = aligned;
@@ -218,7 +219,7 @@ void IrAggr::addFieldInitializers(
       size_t inter_idx = interfacesWithVtbls.size();
       for (auto bc : *cd->vtblInterfaces) {
         constants.push_back(getInterfaceVtblSymbol(bc, inter_idx));
-        offset += Target::ptrsize;
+        offset += target.ptrsize;
         inter_idx++;
 
         if (populateInterfacesWithVtbls)

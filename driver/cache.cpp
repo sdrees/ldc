@@ -209,8 +209,9 @@ public:
 void storeCacheFileName(llvm::StringRef cacheObjectHash,
                         llvm::SmallString<128> &filePath) {
   filePath = opts::cacheDir;
-  llvm::sys::path::append(filePath, llvm::Twine("ircache_") + cacheObjectHash +
-                                        "." + global.obj_ext);
+  llvm::sys::path::append(
+      filePath, llvm::Twine("ircache_") + cacheObjectHash + "." +
+                    llvm::StringRef(global.obj_ext.ptr, global.obj_ext.length));
 }
 
 // Output to `hash_os` all commandline flags, and try to skip the ones that have
@@ -305,13 +306,9 @@ void outputIR2ObjRelevantCmdlineArgs(llvm::raw_ostream &hash_os) {
   hash_os << opts::getCPUStr();
   hash_os << opts::getFeaturesStr();
   hash_os << opts::floatABI;
-#if LDC_LLVM_VER >= 309
   const auto relocModel = opts::getRelocModel();
   if (relocModel.hasValue())
     hash_os << relocModel.getValue();
-#else
-  hash_os << opts::getRelocModel();
-#endif
 #if LDC_LLVM_VER >= 600
   const auto codeModel = opts::getCodeModel();
   if (codeModel.hasValue())
@@ -319,7 +316,13 @@ void outputIR2ObjRelevantCmdlineArgs(llvm::raw_ostream &hash_os) {
 #else
   hash_os << opts::getCodeModel();
 #endif
+#if LDC_LLVM_VER >= 800
+  const auto framePointerUsage = opts::framePointerUsage();
+  if (framePointerUsage.hasValue())
+    hash_os << framePointerUsage.getValue();
+#else
   hash_os << opts::disableFPElim();
+#endif
 }
 
 // Output to `hash_os` all environment flags that influence object code output
@@ -336,7 +339,7 @@ void calculateModuleHash(llvm::Module *m, llvm::SmallString<32> &str) {
   raw_hash_ostream hash_os;
 
   // Let hash depend on the compiler version:
-  hash_os << global.ldc_version << global.version << global.llvm_version
+  hash_os << ldc::ldc_version << ldc::dmd_version << ldc::llvm_version
           << ldc::built_with_Dcompiler_version;
 
   // Let hash depend on compile flags that change the outputted obj file,
@@ -472,13 +475,22 @@ void recoverObjectFile(llvm::StringRef cacheObjectHash,
   {
     int FD;
     if (llvm::sys::fs::openFileForWrite(cacheFile.c_str(), FD,
+#if LDC_LLVM_VER >= 700
+                                        llvm::sys::fs::CD_OpenExisting,
+#endif
                                         llvm::sys::fs::F_Append)) {
       error(Loc(), "Failed to open the cached file for writing: %s",
             cacheFile.c_str());
       fatal();
     }
 
-    if (llvm::sys::fs::setLastModificationAndAccessTime(FD, getTimeNow())) {
+#if LDC_LLVM_VER < 800
+#define SET_LAST_ACCESS_AND_MOD_TIME setLastModificationAndAccessTime
+#else
+#define SET_LAST_ACCESS_AND_MOD_TIME setLastAccessAndModificationTime
+#endif
+
+    if (llvm::sys::fs::SET_LAST_ACCESS_AND_MOD_TIME(FD, getTimeNow())) {
       error(Loc(), "Failed to set the cached file modification time: %s",
             cacheFile.c_str());
       fatal();

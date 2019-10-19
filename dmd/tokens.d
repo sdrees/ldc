@@ -2,7 +2,7 @@
  * Compiler implementation of the
  * $(LINK2 http://www.dlang.org, D programming language).
  *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/tokens.d, _tokens.d)
@@ -22,6 +22,7 @@ import dmd.root.outbuffer;
 import dmd.root.rmem;
 import dmd.utf;
 
+// IN_LLVM: ubyte -> int due to https://issues.dlang.org/show_bug.cgi?id=19658
 enum TOK : int
 {
     reserved,
@@ -220,11 +221,10 @@ enum TOK : int
     lazy_,
     auto_,
     package_,
-    manifest,
     immutable_,
 
     // Statements
-    if_ = 183,
+    if_ = 182,
     else_,
     while_,
     for_,
@@ -250,7 +250,7 @@ enum TOK : int
     onScopeSuccess,
 
     // Contracts
-    invariant_ = 207,
+    invariant_ = 206,
 
     // Testing
     unittest_,
@@ -260,7 +260,7 @@ enum TOK : int
     ref_,
     macro_,
 
-    parameters = 212,
+    parameters = 211,
     traits,
     overloadSet,
     pure_,
@@ -280,11 +280,13 @@ enum TOK : int
     vector,
     pound,
 
-    interval = 231,
+    interval = 230,
     voidExpression,
     cantExpression,
+    showCtfeContext,
 
     objcClassReference,
+    vectorArray,
 
     max_,
 }
@@ -564,7 +566,7 @@ extern (C++) struct Token
         TOK.shared_: "shared",
         TOK.immutable_: "immutable",
 
-        TOK.endOfFile: "EOF",
+        TOK.endOfFile: "End of File",
         TOK.leftCurly: "{",
         TOK.rightCurly: "}",
         TOK.leftParentheses: "(",
@@ -688,13 +690,14 @@ extern (C++) struct Token
 
         TOK.halt: "halt",
         TOK.hexadecimalString: "xstring",
-        TOK.manifest: "manifest",
 
         TOK.interval: "interval",
         TOK.voidExpression: "voidexp",
         TOK.cantExpression: "cantexp",
+        TOK.showCtfeContext : "showCtfeContext",
 
         TOK.objcClassReference: "class",
+        TOK.vectorArray: "vectorarray",
     ];
 
     static assert(() {
@@ -702,6 +705,8 @@ extern (C++) struct Token
             assert(s.length);
         return true;
     }());
+
+nothrow:
 
     shared static this()
     {
@@ -711,26 +716,6 @@ extern (C++) struct Token
             //printf("keyword[%d] = '%s'\n",kw, tochars[kw].ptr);
             Identifier.idPool(tochars[kw].ptr, tochars[kw].length, cast(uint)kw);
         }
-    }
-
-    __gshared Token* freelist = null;
-
-    static Token* alloc()
-    {
-        if (Token.freelist)
-        {
-            Token* t = freelist;
-            freelist = t.next;
-            t.next = null;
-            return t;
-        }
-        return new Token();
-    }
-
-    void free()
-    {
-        next = freelist;
-        freelist = &this;
     }
 
     int isKeyword() const
@@ -743,21 +728,13 @@ extern (C++) struct Token
         return 0;
     }
 
-    debug
-    {
-        void print()
-        {
-            fprintf(stderr, "%s\n", toChars());
-        }
-    }
-
     /****
      * Set to contents of ptr[0..length]
      * Params:
      *  ptr = pointer to string
      *  length = length of string
      */
-    final void setString(const(char)* ptr, size_t length)
+    void setString(const(char)* ptr, size_t length)
     {
         auto s = cast(char*)mem.xmalloc(length + 1);
         memcpy(s, ptr, length);
@@ -772,7 +749,7 @@ extern (C++) struct Token
      * Params:
      *  buf = string (not zero terminated)
      */
-    final void setString(const ref OutBuffer buf)
+    void setString(const ref OutBuffer buf)
     {
         setString(cast(const(char)*)buf.data, buf.offset);
     }
@@ -780,7 +757,7 @@ extern (C++) struct Token
     /****
      * Set to empty string
      */
-    final void setString()
+    void setString()
     {
         ustring = "";
         len = 0;
@@ -866,7 +843,7 @@ extern (C++) struct Token
                 buf.writeByte('"');
                 if (postfix)
                     buf.writeByte(postfix);
-                p = buf.extractString();
+                p = buf.extractChars();
             }
             break;
         case TOK.hexadecimalString:

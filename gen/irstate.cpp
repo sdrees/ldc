@@ -8,9 +8,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/irstate.h"
-#include "declaration.h"
-#include "mtype.h"
-#include "statement.h"
+
+#include "dmd/declaration.h"
+#include "dmd/identifier.h"
+#include "dmd/mtype.h"
+#include "dmd/statement.h"
 #include "gen/funcgenstate.h"
 #include "gen/llvm.h"
 #include "gen/tollvm.h"
@@ -46,17 +48,11 @@ FuncGenState &IRState::funcGen() {
   return *funcGenStates.back();
 }
 
-IrFunction *IRState::func() {
-  return &funcGen().irFunc;
-}
+IrFunction *IRState::func() { return &funcGen().irFunc; }
 
-llvm::Function *IRState::topfunc() {
-  return func()->getLLVMFunc();
-}
+llvm::Function *IRState::topfunc() { return func()->getLLVMFunc(); }
 
-llvm::Instruction *IRState::topallocapoint() {
-  return funcGen().allocapoint;
-}
+llvm::Instruction *IRState::topallocapoint() { return funcGen().allocapoint; }
 
 IRScope &IRState::scope() {
   assert(!scopes.empty());
@@ -91,34 +87,35 @@ llvm::BasicBlock *IRState::insertBB(const llvm::Twine &name) {
 }
 
 LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee, const char *Name) {
-  LLSmallVector<LLValue *, 1> args;
-  return funcGen().callOrInvoke(Callee, args, Name);
+  return funcGen().callOrInvoke(Callee, {}, Name);
+}
+
+LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee,
+                                       llvm::ArrayRef<LLValue *> Args,
+                                       const char *Name, bool isNothrow) {
+  return funcGen().callOrInvoke(Callee, Args, Name, isNothrow);
 }
 
 LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
                                        const char *Name) {
-  LLValue *args[] = {Arg1};
-  return funcGen().callOrInvoke(Callee, args, Name);
+  return funcGen().callOrInvoke(Callee, {Arg1}, Name);
 }
 
 LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
                                        LLValue *Arg2, const char *Name) {
-  LLValue *args[] = {Arg1, Arg2};
-  return funcGen().callOrInvoke(Callee, args, Name);
+  return CreateCallOrInvoke(Callee, {Arg1, Arg2}, Name);
 }
 
 LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
                                        LLValue *Arg2, LLValue *Arg3,
                                        const char *Name) {
-  LLValue *args[] = {Arg1, Arg2, Arg3};
-  return funcGen().callOrInvoke(Callee, args, Name);
+  return CreateCallOrInvoke(Callee, {Arg1, Arg2, Arg3}, Name);
 }
 
 LLCallSite IRState::CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
                                        LLValue *Arg2, LLValue *Arg3,
                                        LLValue *Arg4, const char *Name) {
-  LLValue *args[] = {Arg1, Arg2, Arg3, Arg4};
-  return funcGen().callOrInvoke(Callee, args, Name);
+  return CreateCallOrInvoke(Callee, {Arg1, Arg2, Arg3, Arg4}, Name);
 }
 
 bool IRState::isMainFunc(const IrFunction *func) const {
@@ -183,6 +180,17 @@ void IRState::replaceGlobals() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+LLConstant *IRState::getStructLiteralConstant(StructLiteralExp *sle) const {
+  return static_cast<LLConstant *>(structLiteralConstants.lookup(sle));
+}
+
+void IRState::setStructLiteralConstant(StructLiteralExp *sle,
+                                       LLConstant *constant) {
+  structLiteralConstants[sle] = constant;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 IRBuilder<> *IRBuilderHelper::operator->() {
   IRBuilder<> &b = state->scope().builder;
   assert(b.GetInsertBlock() != NULL);
@@ -192,9 +200,5 @@ IRBuilder<> *IRBuilderHelper::operator->() {
 ////////////////////////////////////////////////////////////////////////////////
 
 bool useMSVCEH() {
-#if LDC_LLVM_VER >= 308
   return global.params.targetTriple->isWindowsMSVCEnvironment();
-#else
-  return false;
-#endif
 }

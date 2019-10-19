@@ -8,7 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "driver/linker.h"
-#include "errors.h"
+
+#include "dmd/errors.h"
+#include "driver/args.h"
 #include "driver/cl_options.h"
 #include "driver/tool.h"
 #include "gen/llvm.h"
@@ -58,7 +60,8 @@ static cl::alias _linkDebugLib("link-debuglib", cl::Hidden,
 
 static cl::opt<cl::boolOrDefault> linkDefaultLibShared(
     "link-defaultlib-shared", cl::ZeroOrMore,
-    cl::desc("Link with shared versions of default libraries"),
+    cl::desc("Link with shared versions of default libraries. Defaults to true "
+             "when generating a shared library (-shared)."),
     cl::cat(opts::linkingCategory));
 
 static cl::opt<cl::boolOrDefault>
@@ -66,6 +69,12 @@ static cl::opt<cl::boolOrDefault>
                cl::desc("Create a statically linked binary, including "
                         "all system dependencies"),
                cl::cat(opts::linkingCategory));
+
+static llvm::cl::opt<std::string>
+    mscrtlib("mscrtlib", llvm::cl::ZeroOrMore,
+             llvm::cl::desc("MS C runtime library to link with"),
+             llvm::cl::value_desc("libcmt[d]|msvcrt[d]"),
+             llvm::cl::cat(opts::linkingCategory));
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -85,16 +94,19 @@ static std::string getOutputName() {
 
   const char *extension = nullptr;
   if (sharedLib) {
-    extension = global.dll_ext;
+    extension = global.dll_ext.ptr;
   } else if (triple.isOSWindows()) {
     extension = "exe";
+  } else if (triple.getArch() == llvm::Triple::wasm32 ||
+             triple.getArch() == llvm::Triple::wasm64) {
+    extension = "wasm";
   }
 
-  if (global.params.exefile) {
+  if (global.params.exefile.length) {
     // DMD adds the default extension if there is none
     return opts::invokedByLDMD && extension
-               ? FileName::defaultExt(global.params.exefile, extension)
-               : global.params.exefile;
+               ? FileName::defaultExt(global.params.exefile.ptr, extension)
+               : global.params.exefile.ptr;
   }
 
   // Infer output name from first object file.
@@ -172,6 +184,29 @@ bool linkAgainstSharedDefaultLibs() {
 
 //////////////////////////////////////////////////////////////////////////////
 
+bool useInternalToolchainForMSVC() {
+#ifndef _WIN32
+  return true;
+#else
+  return !env::has(L"VSINSTALLDIR") && !env::has(L"LDC_VSDIR");
+#endif
+}
+
+llvm::StringRef getMscrtLibName() {
+  llvm::StringRef name = mscrtlib;
+  if (name.empty()) {
+    if (useInternalToolchainForMSVC()) {
+      name = "vcruntime140";
+    } else {
+      // default to static release variant
+      name = linkFullyStatic() != llvm::cl::BOU_FALSE ? "libcmt" : "msvcrt";
+    }
+  }
+  return name;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 /// Insert an LLVM bitcode file into the module
 static void insertBitcodeIntoModule(const char *bcFile, llvm::Module &M,
                                     llvm::LLVMContext &Context) {
@@ -184,11 +219,7 @@ static void insertBitcodeIntoModule(const char *bcFile, llvm::Module &M,
     error(Loc(), "Error when loading LLVM bitcode file: %s", bcFile);
     fatal();
   }
-#if LDC_LLVM_VER >= 308
   llvm::Linker(M).linkInModule(std::move(loadedModule));
-#else
-  llvm::Linker(&M).linkInModule(loadedModule.release());
-#endif
 }
 
 /// Insert LLVM bitcode files into the module

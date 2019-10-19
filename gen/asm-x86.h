@@ -18,8 +18,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "id.h"
-#include "ldcbindings.h"
+#include "dmd/id.h"
+#include "dmd/identifier.h"
+#include "dmd/ldcbindings.h"
+#include "dmd/mangle.h"
 #include "gen/llvmhelpers.h" // printLabelName
 #include <cctype>
 
@@ -2037,7 +2039,7 @@ struct AsmProcessor {
 
   static const unsigned Max_Operands = 3;
 
-  AsmStatement *stmt;
+  InlineAsmStatement *stmt;
   Scope *sc;
 
   Token *token;
@@ -2049,7 +2051,7 @@ struct AsmProcessor {
   Identifier *opIdent;
   Operand *operand;
 
-  AsmProcessor(Scope *sc, AsmStatement *stmt) {
+  AsmProcessor(Scope *sc, InlineAsmStatement *stmt) {
     this->sc = sc;
     this->stmt = stmt;
     token = stmt->tokens;
@@ -2066,19 +2068,19 @@ struct AsmProcessor {
         }
         regInfo[i].gccName = std::string(buf, p - buf);
         if ((i <= Reg_ST || i > Reg_ST7) && i != Reg_EFLAGS) {
-          regInfo[i].ident = Identifier::idPool(regInfo[i].name.data(),
-                                                regInfo[i].name.size());
+          regInfo[i].ident =
+              Identifier::idPool(regInfo[i].name.data(),
+                                 static_cast<unsigned>(regInfo[i].name.size()));
         }
       }
 
       for (int i = 0; i < N_PtrNames; i++) {
-        ptrTypeIdentTable[i] = Identifier::idPool(
-            ptrTypeNameTable[i], std::strlen(ptrTypeNameTable[i]));
+        ptrTypeIdentTable[i] = Identifier::idPool(ptrTypeNameTable[i]);
       }
 
       Handled = createExpression(Loc(), TOKvoid, sizeof(Expression));
 
-      ident_seg = Identifier::idPool("seg", std::strlen("seg"));
+      ident_seg = Identifier::idPool("seg");
 
       eof_tok.value = TOKeof;
       eof_tok.next = nullptr;
@@ -2369,7 +2371,7 @@ struct AsmProcessor {
             }
             OutBuffer buf;
             mangleToBuffer(vd, &buf);
-            insnTemplate << buf.peekString();
+            insnTemplate << buf.peekChars();
             getIrGlobal(vd, true)->nakedUse = true;
             break;
           }
@@ -3046,7 +3048,7 @@ struct AsmProcessor {
               }
               OutBuffer buf;
               mangleToBuffer(decl, &buf);
-              insnTemplate << buf.peekString();
+              insnTemplate << buf.peekChars();
               //              addOperand2("${", ":c}", Arg_Pointer, e,
               //              asmcode);
             } else {
@@ -3092,6 +3094,8 @@ struct AsmProcessor {
         return false;
       }
     }
+
+    mem.addRange(asmcode->args.data(), asmcode->args.size() * sizeof(AsmArg));
 
     asmcode->insnTemplate = insnTemplate.str();
     Logger::cout() << "insnTemplate = " << asmcode->insnTemplate << '\n';
@@ -3660,7 +3664,8 @@ struct AsmProcessor {
         stmt->error("`seg` not supported");
         e = parseAsmExp();
       } else if (token->ident == Id::offset || token->ident == Id::offsetof) {
-        if (token->ident == Id::offset && !global.params.useDeprecated) {
+        if (token->ident == Id::offset &&
+            global.params.useDeprecated == DIAGNOSTICerror) {
           stmt->error("offset deprecated, use `offsetof`");
         }
         nextToken();
@@ -4011,7 +4016,7 @@ bool getFrameRelativeValue(LLValue *decl, HOST_WIDE_INT *result) {
 }
 
 struct AsmParser : public AsmParserCommon {
-  void run(Scope *sc, AsmStatement *asmst) override {
+  void run(Scope *sc, InlineAsmStatement *asmst) override {
     AsmProcessor ap(sc, asmst);
     ap.run();
   }

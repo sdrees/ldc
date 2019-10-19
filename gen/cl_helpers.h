@@ -12,12 +12,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_CL_HELPERS_H
-#define LDC_GEN_CL_HELPERS_H
+#pragma once
 
+#include "dmd/globals.h" // for CHECKENABLE enum
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
-#include "globals.h" // for CHECKENABLE enum
 
 #if LDC_LLVM_VER >= 500
 #define LLVM_END_WITH_NULL
@@ -29,12 +28,12 @@ typedef Array<const char *> Strings;
 namespace opts {
 namespace cl = llvm::cl;
 
-/// Duplicate the string and replace '/' with '\' on Windows.
-char *dupPathString(llvm::StringRef src);
+/// Duplicate the string (incl. null-termination) and replace '/' with '\' on
+/// Windows.
+DString dupPathString(llvm::StringRef src);
 
 /// Helper function to handle -of, -od, etc.
-/// llvm::cl::opt<std::string> --> char*
-void initFromPathString(const char *&dest, const cl::opt<std::string> &src);
+DString fromPathString(const cl::opt<std::string> &src);
 
 /// Helper class to determine values
 template <class DT> struct FlagParserDataType {};
@@ -137,11 +136,7 @@ public:
     return true;
   }
 
-#if LDC_LLVM_VER >= 308
   void getExtraOptionNames(llvm::SmallVectorImpl<llvm::StringRef> &Names) {
-#else
-  void getExtraOptionNames(llvm::SmallVectorImpl<const char *> &Names) {
-#endif
     for (auto I = switches.begin() + 1, E = switches.end(); I != E; ++I) {
       Names.push_back(I->first.data());
     }
@@ -166,11 +161,11 @@ private:
 
 /// Helper class for options that set multiple flags
 class MultiSetter {
-  std::vector<bool *> locations;
+  std::vector<CHECKENABLE *> locations;
   bool invert;
   explicit MultiSetter(bool); // not implemented, disable auto-conversion
 public:
-  MultiSetter(bool invert, bool *p, ...) LLVM_END_WITH_NULL;
+  MultiSetter(bool invert, CHECKENABLE *p, ...) LLVM_END_WITH_NULL;
 
   void operator=(bool val);
 };
@@ -205,6 +200,4 @@ llvm::cl::ValuesClass<DataType> clEnumValues(const char *Arg, DataType Val,
                                              OptsTy... Options) {
   return llvm::cl::values(Arg, Val, Desc, Options..., clEnumValEnd);
 }
-#endif
-
 #endif

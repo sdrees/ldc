@@ -2,7 +2,7 @@
  * Compiler implementation of the
  * $(LINK2 http://www.dlang.org, D programming language).
  *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/dimport.d, _dimport.d)
@@ -47,9 +47,30 @@ extern (C++) final class Import : Dsymbol
     // corresponding AliasDeclarations for alias=name pairs
     AliasDeclarations aliasdecls;
 
-    extern (D) this(Loc loc, Identifiers* packages, Identifier id, Identifier aliasId, int isstatic)
+    extern (D) this(const ref Loc loc, Identifiers* packages, Identifier id, Identifier aliasId, int isstatic)
     {
-        super(null);
+        Identifier selectIdent()
+        {
+            // select Dsymbol identifier (bracketed)
+            if (aliasId)
+            {
+                // import [aliasId] = std.stdio;
+                return aliasId;
+            }
+            else if (packages && packages.dim)
+            {
+                // import [std].stdio;
+                return (*packages)[0];
+            }
+            else
+            {
+                // import [id];
+                return id;
+            }
+        }
+
+        super(loc, selectIdent());
+
         assert(id);
         version (none)
         {
@@ -64,31 +85,14 @@ extern (C++) final class Import : Dsymbol
             }
             printf("%s)\n", id.toChars());
         }
-        this.loc = loc;
         this.packages = packages;
         this.id = id;
         this.aliasId = aliasId;
         this.isstatic = isstatic;
         this.protection = Prot.Kind.private_; // default to private
-        // Set symbol name (bracketed)
-        if (aliasId)
-        {
-            // import [cstdio] = std.stdio;
-            this.ident = aliasId;
-        }
-        else if (packages && packages.dim)
-        {
-            // import [std].stdio;
-            this.ident = (*packages)[0];
-        }
-        else
-        {
-            // import [foo];
-            this.ident = id;
-        }
     }
 
-    void addAlias(Identifier name, Identifier _alias)
+    extern (D) void addAlias(Identifier name, Identifier _alias)
     {
         if (isstatic)
             error("cannot have an import bind list");
@@ -103,7 +107,7 @@ extern (C++) final class Import : Dsymbol
         return isstatic ? "static import" : "import";
     }
 
-    override Prot prot()
+    override Prot prot() pure nothrow @nogc @safe
     {
         return protection;
     }
@@ -120,10 +124,16 @@ extern (C++) final class Import : Dsymbol
         return si;
     }
 
-    void load(Scope* sc)
+    /*******************************
+     * Load this module.
+     * Returns:
+     *  true for errors, false for success
+     */
+    bool load(Scope* sc)
     {
         //printf("Import::load('%s') %p\n", toPrettyChars(), this);
         // See if existing module
+        const errors = global.errors;
         DsymbolTable dst = Package.resolve(packages, null, &pkg);
         version (none)
         {
@@ -131,7 +141,7 @@ extern (C++) final class Import : Dsymbol
             {
                 .error(loc, "can only import from a module, not from a member of module `%s`. Did you mean `import %s : %s`?", pkg.toChars(), pkg.toPrettyChars(), id.toChars());
                 mod = pkg.isModule(); // Error recovery - treat as import of that module
-                return;
+                return true;
             }
         }
         Dsymbol s = dst.lookup(id);
@@ -194,32 +204,28 @@ extern (C++) final class Import : Dsymbol
         if (!pkg)
             pkg = mod;
         //printf("-Import::load('%s'), pkg = %p\n", toChars(), pkg);
+        return global.errors != errors;
     }
 
     override void importAll(Scope* sc)
     {
-        if (!mod)
+        if (mod) return; // Already done
+        load(sc);
+        if (!mod) return; // Failed
+
+        mod.importAll(null);
+        if (mod.md && mod.md.isdeprecated)
         {
-            load(sc);
-            if (mod) // if successfully loaded module
-            {
-                if (mod.md && mod.md.isdeprecated)
-                {
-                    Expression msg = mod.md.msg;
-                    if (StringExp se = msg ? msg.toStringExp() : null)
-                        mod.deprecation(loc, "is deprecated - %s", se.string);
-                    else
-                        mod.deprecation(loc, "is deprecated");
-                }
-                mod.importAll(null);
-                if (sc.explicitProtection)
-                    protection = sc.protection;
-                if (!isstatic && !aliasId && !names.dim)
-                {
-                    sc.scopesym.importScope(mod, protection);
-                }
-            }
+            Expression msg = mod.md.msg;
+            if (StringExp se = msg ? msg.toStringExp() : null)
+                mod.deprecation(loc, "is deprecated - %s", se.string);
+            else
+                mod.deprecation(loc, "is deprecated");
         }
+        if (sc.explicitProtection)
+            protection = sc.protection;
+        if (!isstatic && !aliasId && !names.dim)
+            sc.scopesym.importScope(mod, protection);
     }
 
     override Dsymbol toAlias()

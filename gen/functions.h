@@ -11,16 +11,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_FUNCTIONS_H
-#define LDC_GEN_FUNCTIONS_H
-
-#include "mars.h"
+#pragma once
 
 class DValue;
 class Expression;
 class FuncDeclaration;
 struct IRAsmBlock;
 struct IrFuncTy;
+struct Loc;
 class Parameter;
 class Type;
 namespace llvm {
@@ -28,10 +26,8 @@ class FunctionType;
 }
 
 llvm::FunctionType *DtoFunctionType(Type *t, IrFuncTy &irFty, Type *thistype,
-                                    Type *nesttype, bool isMain = false,
-                                    bool isCtor = false,
-                                    bool isIntrinsic = false,
-                                    bool hasSel = false);
+                                    Type *nesttype,
+                                    FuncDeclaration *fd = nullptr);
 llvm::FunctionType *DtoFunctionType(FuncDeclaration *fdecl);
 
 void DtoResolveFunction(FuncDeclaration *fdecl);
@@ -43,5 +39,3 @@ void emitABIReturnAsmStmt(IRAsmBlock *asmblock, Loc &loc,
                           FuncDeclaration *fdecl);
 
 DValue *DtoArgument(Parameter *fnarg, Expression *argexp);
-
-#endif

@@ -8,12 +8,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/tollvm.h"
-#include "aggregate.h"
-#include "declaration.h"
-#include "dsymbol.h"
-#include "id.h"
-#include "init.h"
-#include "module.h"
+
+#include "dmd/aggregate.h"
+#include "dmd/declaration.h"
+#include "dmd/dsymbol.h"
+#include "dmd/expression.h"
+#include "dmd/id.h"
+#include "dmd/init.h"
+#include "dmd/module.h"
+#include "driver/cl_options.h"
 #include "gen/abi.h"
 #include "gen/arrays.h"
 #include "gen/classes.h"
@@ -44,17 +47,18 @@ bool DtoIsInMemoryOnly(Type *type) {
 bool DtoIsReturnInArg(CallExp *ce) {
   Type *t = ce->e1->type->toBasetype();
   if (t->ty == Tfunction && (!ce->f || !DtoIsIntrinsic(ce->f))) {
-    return gABI->returnInArg(static_cast<TypeFunction *>(t));
+    return gABI->returnInArg(static_cast<TypeFunction *>(t),
+                             ce->f && ce->f->needThis());
   }
   return false;
 }
 
-LLAttribute DtoShouldExtend(Type *type) {
+void DtoAddExtendAttr(Type *type, llvm::AttrBuilder &attrs) {
   type = type->toBasetype();
   if (type->isintegral() && type->ty != Tvector && type->size() <= 2) {
-    return type->isunsigned() ? LLAttribute::ZExt : LLAttribute::SExt;
+    attrs.addAttribute(type->isunsigned() ? LLAttribute::ZExt
+                                          : LLAttribute::SExt);
   }
-  return LLAttribute::None;
 }
 
 LLType *DtoType(Type *t) {
@@ -184,17 +188,11 @@ LLType *DtoMemType(Type *t) { return i1ToI8(voidToI8(DtoType(t))); }
 LLPointerType *DtoPtrToType(Type *t) { return DtoMemType(t)->getPointerTo(); }
 
 LLType *voidToI8(LLType *t) {
-  if (t == LLType::getVoidTy(gIR->context())) {
-    return LLType::getInt8Ty(gIR->context());
-  }
-  return t;
+  return t->isVoidTy() ? LLType::getInt8Ty(t->getContext()) : t;
 }
 
 LLType *i1ToI8(LLType *t) {
-  if (t == LLType::getInt1Ty(gIR->context())) {
-    return LLType::getInt8Ty(gIR->context());
-  }
-  return t;
+  return t->isIntegerTy(1) ? LLType::getInt8Ty(t->getContext()) : t;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -229,7 +227,15 @@ LinkageWithCOMDAT DtoLinkage(Dsymbol *sym) {
 }
 
 bool supportsCOMDAT() {
-  return !global.params.targetTriple->isOSBinFormatMachO();
+  const auto &triple = *global.params.targetTriple;
+  return !(triple.isOSBinFormatMachO() ||
+#if LDC_LLVM_VER >= 500
+           triple.isOSBinFormatWasm()
+#else
+           triple.getArch() == llvm::Triple::wasm32 ||
+           triple.getArch() == llvm::Triple::wasm64
+#endif
+  );
 }
 
 void setLinkage(LinkageWithCOMDAT lwc, llvm::GlobalObject *obj) {
@@ -238,8 +244,14 @@ void setLinkage(LinkageWithCOMDAT lwc, llvm::GlobalObject *obj) {
     obj->setComdat(gIR->module.getOrInsertComdat(obj->getName()));
 }
 
-void setLinkage(Dsymbol *sym, llvm::GlobalObject *obj) {
+void setLinkageAndVisibility(Dsymbol *sym, llvm::GlobalObject *obj) {
   setLinkage(DtoLinkage(sym), obj);
+  setVisibility(sym, obj);
+}
+
+void setVisibility(Dsymbol *sym, llvm::GlobalObject *obj) {
+  if (opts::defaultToHiddenVisibility && !sym->isExport())
+    obj->setVisibility(LLGlobalValue::HiddenVisibility);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -267,46 +279,45 @@ LLIntegerType *DtoSize_t() {
 
 namespace {
 llvm::GetElementPtrInst *DtoGEP(LLValue *ptr, llvm::ArrayRef<LLValue *> indices,
-                                bool inBounds, const char *name,
-                                llvm::BasicBlock *bb) {
+                                const char *name, llvm::BasicBlock *bb) {
   LLPointerType *p = isaPointer(ptr);
   assert(p && "GEP expects a pointer type");
-  auto gep = llvm::GetElementPtrInst::Create(
-      p->getElementType(), ptr, indices, name, bb ? bb : gIR->scopebb());
-  gep->setIsInBounds(inBounds);
+  auto gep = llvm::GetElementPtrInst::Create(p->getElementType(), ptr, indices,
+                                             name, bb ? bb : gIR->scopebb());
+  gep->setIsInBounds(true);
   return gep;
 }
 }
 
-LLValue *DtoGEP1(LLValue *ptr, LLValue *i0, bool inBounds, const char *name,
+LLValue *DtoGEP1(LLValue *ptr, LLValue *i0, const char *name,
                  llvm::BasicBlock *bb) {
-  return DtoGEP(ptr, i0, inBounds, name, bb);
+  return DtoGEP(ptr, i0, name, bb);
 }
 
-LLValue *DtoGEP(LLValue *ptr, LLValue *i0, LLValue *i1, bool inBounds,
-                const char *name, llvm::BasicBlock *bb) {
+LLValue *DtoGEP(LLValue *ptr, LLValue *i0, LLValue *i1, const char *name,
+                llvm::BasicBlock *bb) {
   LLValue *indices[] = {i0, i1};
-  return DtoGEP(ptr, indices, inBounds, name, bb);
+  return DtoGEP(ptr, indices, name, bb);
 }
 
-LLValue *DtoGEPi1(LLValue *ptr, unsigned i0, const char *name,
-                  llvm::BasicBlock *bb) {
-  return DtoGEP(ptr, DtoConstUint(i0), /* inBounds = */ true, name, bb);
-}
-
-LLValue *DtoGEPi(LLValue *ptr, unsigned i0, unsigned i1, const char *name,
+LLValue *DtoGEP1(LLValue *ptr, unsigned i0, const char *name,
                  llvm::BasicBlock *bb) {
-  LLValue *indices[] = {DtoConstUint(i0), DtoConstUint(i1)};
-  return DtoGEP(ptr, indices, /* inBounds = */ true, name, bb);
+  return DtoGEP(ptr, DtoConstUint(i0), name, bb);
 }
 
-LLConstant *DtoGEPi(LLConstant *ptr, unsigned i0, unsigned i1) {
+LLValue *DtoGEP(LLValue *ptr, unsigned i0, unsigned i1, const char *name,
+                llvm::BasicBlock *bb) {
+  LLValue *indices[] = {DtoConstUint(i0), DtoConstUint(i1)};
+  return DtoGEP(ptr, indices, name, bb);
+}
+
+LLConstant *DtoGEP(LLConstant *ptr, unsigned i0, unsigned i1) {
   LLPointerType *p = isaPointer(ptr);
   (void)p;
   assert(p && "GEP expects a pointer type");
   LLValue *indices[] = {DtoConstUint(i0), DtoConstUint(i1)};
-  return llvm::ConstantExpr::getGetElementPtr(
-      p->getElementType(), ptr, indices, /* InBounds = */ true);
+  return llvm::ConstantExpr::getGetElementPtr(p->getElementType(), ptr, indices,
+                                              /* InBounds = */ true);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -424,11 +435,7 @@ LLConstant *DtoConstCString(const char *str) {
     gvar = new llvm::GlobalVariable(gIR->module, init->getType(), true,
                                     llvm::GlobalValue::PrivateLinkage, init,
                                     ".str");
-#if LDC_LLVM_VER >= 309
     gvar->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-#else
-    gvar->setUnnamedAddr(true);
-#endif
     gIR->stringLiteral1ByteCache[s] = gvar;
   }
 
@@ -453,7 +460,7 @@ LLValue *DtoLoad(LLValue *src, const char *name) {
 // the type.
 LLValue *DtoAlignedLoad(LLValue *src, const char *name) {
   llvm::LoadInst *ld = gIR->ir->CreateLoad(src, name);
-  ld->setAlignment(getABITypeAlign(ld->getType()));
+  ld->setAlignment(LLMaybeAlign(getABITypeAlign(ld->getType())));
   return ld;
 }
 
@@ -490,7 +497,7 @@ void DtoAlignedStore(LLValue *src, LLValue *dst) {
   assert(src->getType() != llvm::Type::getInt1Ty(gIR->context()) &&
          "Should store bools as i8 instead of i1.");
   llvm::StoreInst *st = gIR->ir->CreateStore(src, dst);
-  st->setAlignment(getABITypeAlign(src->getType()));
+  st->setAlignment(LLMaybeAlign(getABITypeAlign(src->getType())));
 }
 
 ////////////////////////////////////////////////////////////////////////////////

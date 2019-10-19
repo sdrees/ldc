@@ -9,12 +9,14 @@
 
 #include "gen/function-inlining.h"
 
-#include "declaration.h"
-#include "globals.h"
-#include "id.h"
-#include "module.h"
-#include "statement.h"
-#include "template.h"
+#include "dmd/declaration.h"
+#include "dmd/errors.h"
+#include "dmd/expression.h"
+#include "dmd/globals.h"
+#include "dmd/id.h"
+#include "dmd/module.h"
+#include "dmd/statement.h"
+#include "dmd/template.h"
 #include "gen/logger.h"
 #include "gen/optimizer.h"
 #include "gen/recursivevisitor.h"
@@ -87,15 +89,6 @@ bool defineAsExternallyAvailable(FuncDeclaration &fdecl) {
   IF_LOG Logger::println("Enter defineAsExternallyAvailable");
   LOG_SCOPE
 
-  // FIXME: For now, disable all cross-module inlining (also of pragma(inline, true)
-  // functions). This check should be removed when cross-module inlining has
-  // become more stable.
-  // There are related `FIXME`s in a few lit-based `codegen/inlining_*.d` tests.
-  if (!willCrossModuleInline()) {
-    IF_LOG Logger::println("Cross-module inlining fully disabled.");
-    return false;
-  }
-
   // Implementation note: try to do cheap checks first.
 
   if (fdecl.neverInline || fdecl.inlining == PINLINEnever) {
@@ -133,15 +126,6 @@ bool defineAsExternallyAvailable(FuncDeclaration &fdecl) {
   // See https://github.com/ldc-developers/ldc/issues/1678
   if (fdecl.isInvariantDeclaration()) {
     IF_LOG Logger::println("__invariant cannot be emitted.");
-    return false;
-  }
-
-  // TODO: Fix inlining functions from object.d. Currently errors because of
-  // TypeInfo type-mismatch issue (TypeInfo classes get special treatment by the
-  // compiler). To start working on it: comment-out this check and druntime will
-  // fail to compile.
-  if (fdecl.getModule()->ident == Id::object) {
-    IF_LOG Logger::println("Inlining of object.d functions is disabled");
     return false;
   }
 

@@ -12,38 +12,39 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "gen/runtime.h"
-#include "gen/metadata.h"
-#include "gen/attributes.h"
-
 #define DEBUG_TYPE "dgc2stack"
+#if LDC_LLVM_VER < 700
+#define LLVM_DEBUG DEBUG
+#endif
 
-#include "Passes.h"
-
+#include "gen/attributes.h"
+#include "metadata.h"
+#include "gen/passes/Passes.h"
+#include "gen/runtime.h"
 #include "llvm/Pass.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/CallSite.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Analysis/CallGraph.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/IR/CallSite.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+
 #if LDC_LLVM_VER >= 500
 #include "llvm/Support/KnownBits.h"
 #endif
-
-#include <algorithm>
 
 using namespace llvm;
 
@@ -78,11 +79,10 @@ void EmitMemSet(IRBuilder<> &B, Value *Dst, Value *Val, Value *Len,
                 const Analysis &A) {
   Dst = B.CreateBitCast(Dst, PointerType::getUnqual(B.getInt8Ty()));
 
-  CallSite CS =
-      B.CreateMemSet(Dst, Val, Len, 1 /*Align*/, false /*isVolatile*/);
+  auto CS = B.CreateMemSet(Dst, Val, Len, 1 /*Align*/, false /*isVolatile*/);
   if (A.CGNode) {
-    A.CGNode->addCalledFunction(
-        CS, A.CG->getOrInsertFunction(CS.getCalledFunction()));
+    auto calledFunc = CS->getCalledFunction();
+    A.CGNode->addCalledFunction(CS, A.CG->getOrInsertFunction(calledFunc));
   }
 }
 
@@ -451,7 +451,11 @@ static void RemoveCall(CallSite CS, const Analysis &A) {
 
   // Remove the runtime call.
   if (A.CGNode) {
+#if LDC_LLVM_VER >= 900
+    A.CGNode->removeCallEdgeFor(*cast<CallBase>(CS.getInstruction()));
+#else
     A.CGNode->removeCallEdgeFor(CS);
+#endif
   }
   CS->eraseFromParent();
 }
@@ -466,7 +470,7 @@ isSafeToStackAllocate(BasicBlock::iterator Alloc, Value *V, DominatorTree &DT,
 /// runOnFunction - Top level algorithm.
 ///
 bool GarbageCollect2Stack::runOnFunction(Function &F) {
-  DEBUG(errs() << "\nRunning -dgc2stack on function " << F.getName() << '\n');
+  LLVM_DEBUG(errs() << "\nRunning -dgc2stack on function " << F.getName() << '\n');
 
   const DataLayout &DL = F.getParent()->getDataLayout();
   DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
@@ -514,7 +518,7 @@ bool GarbageCollect2Stack::runOnFunction(Function &F) {
         continue;
       }
 
-      DEBUG(errs() << "GarbageCollect2Stack inspecting: " << *Inst);
+      LLVM_DEBUG(errs() << "GarbageCollect2Stack inspecting: " << *Inst);
 
       if (!info->analyze(CS, A)) {
         continue;
@@ -543,7 +547,7 @@ bool GarbageCollect2Stack::runOnFunction(Function &F) {
       IRBuilder<> Builder(&BB, originalI);
       Value *newVal = info->promote(CS, Builder, A);
 
-      DEBUG(errs() << "Promoted to: " << *newVal);
+      LLVM_DEBUG(errs() << "Promoted to: " << *newVal);
 
       // Make sure the type is the same as it was before, and replace all
       // uses of the runtime call with the alloca.
@@ -583,14 +587,14 @@ llvm::Type *Analysis::getTypeFor(Value *typeinfo) const {
     return nullptr;
   }
 
-  Value *ti = llvm::MetadataAsValue::get(node->getContext(),
-                                         node->getOperand(TD_TypeInfo));
-  if (!ti || ti->stripPointerCasts() != ti_global) {
+  auto md = llvm::dyn_cast<llvm::ValueAsMetadata>(
+              node->getOperand(TD_TypeInfo).get());
+  if (md == nullptr || md->getValue()->stripPointerCasts() != ti_global) {
     return nullptr;
   }
 
-  return llvm::MetadataAsValue::get(node->getContext(),
-                                    node->getOperand(TD_Type))
+
+  return llvm::cast<llvm::ValueAsMetadata>(node->getOperand(TD_Type))
       ->getType();
 }
 
@@ -598,7 +602,7 @@ llvm::Type *Analysis::getTypeFor(Value *typeinfo) const {
 /// (without executing Def again).
 static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
                                   DominatorTree &DT) {
-  DEBUG(errs() << "### mayBeUsedAfterRealloc()\n" << *Def << *Alloc);
+  LLVM_DEBUG(errs() << "### mayBeUsedAfterRealloc()\n" << *Def << *Alloc);
 
   // If the definition isn't used it obviously won't be used after the
   // allocation.
@@ -606,11 +610,11 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
   // without going through Def again first, since the definition couldn't
   // dominate the user either.
   if (Def->use_empty() || !DT.dominates(Def, &(*Alloc))) {
-    DEBUG(errs() << "### No uses or does not dominate allocation\n");
+    LLVM_DEBUG(errs() << "### No uses or does not dominate allocation\n");
     return false;
   }
 
-  DEBUG(errs() << "### Def dominates Alloc\n");
+  LLVM_DEBUG(errs() << "### Def dominates Alloc\n");
 
   BasicBlock *DefBlock = Def->getParent();
   BasicBlock *AllocBlock = Alloc->getParent();
@@ -621,7 +625,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
   for (Instruction::use_iterator UI = Def->use_begin(), UE = Def->use_end();
        UI != UE; ++UI) {
     Instruction *User = cast<Instruction>(*UI);
-    DEBUG(errs() << "USER: " << *User);
+    LLVM_DEBUG(errs() << "USER: " << *User);
     BasicBlock *UserBlock = User->getParent();
 
     // This dominance check is not performed if they're in the same block
@@ -631,7 +635,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
     if (AllocBlock != UserBlock && DT.dominates(AllocBlock, UserBlock)) {
       // There's definitely a path from alloc to this user that does not
       // go through Def, namely any path that ends up in that user.
-      DEBUG(errs() << "### Alloc dominates user " << *User);
+      LLVM_DEBUG(errs() << "### Alloc dominates user " << *User);
       return true;
     }
 
@@ -671,7 +675,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
         // This block does not contain the definition or the allocation,
         // so any user in this block is definitely reachable without
         // finding either the definition or the allocation.
-        DEBUG(errs() << "### Block " << B->getName()
+        LLVM_DEBUG(errs() << "### Block " << B->getName()
                      << " contains a reachable user\n");
         return true;
       }
@@ -682,7 +686,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
           break;
         }
         if (Users.count(&(*BBI))) {
-          DEBUG(errs() << "### Problematic user: " << *BBI);
+          LLVM_DEBUG(errs() << "### Problematic user: " << *BBI);
           return true;
         }
       }
@@ -698,7 +702,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
 
     // All instructions after the starting point in this block have been
     // accounted for. Look for successors to add to the work list.
-    TerminatorInst *Term = B->getTerminator();
+    auto *Term = B->getTerminator();
     unsigned SuccCount = Term->getNumSuccessors();
     for (unsigned i = 0; i < SuccCount; i++) {
       BasicBlock *Succ = Term->getSuccessor(i);
@@ -708,7 +712,7 @@ static bool mayBeUsedAfterRealloc(Instruction *Def, BasicBlock::iterator Alloc,
       bool SeenDef = false;
       while (isa<PHINode>(BBI)) {
         if (Def == cast<PHINode>(BBI)->getIncomingValueForBlock(B)) {
-          DEBUG(errs() << "### Problematic phi user: " << *BBI);
+          LLVM_DEBUG(errs() << "### Problematic phi user: " << *BBI);
           return true;
         }
         SeenDef |= (Def == &*BBI);
@@ -741,9 +745,11 @@ bool isSafeToStackAllocateArray(
   assert(Alloc->getType()->isStructTy() && "Allocated array is not a struct?");
   Value *V = &(*Alloc);
 
-  for (Value::use_iterator UI = V->use_begin(), UE = V->use_end(); UI != UE;
-       ++UI) {
-    Instruction *User = cast<Instruction>(*UI);
+  for (auto U : V->users()) {
+    Instruction *User = dyn_cast<Instruction>(U);
+    if (User == nullptr) {
+      continue;
+    }
 
     switch (User->getOpcode()) {
     case Instruction::ExtractValue: {
@@ -846,7 +852,7 @@ bool isSafeToStackAllocate(BasicBlock::iterator Alloc, Value *V,
           const unsigned paramHasAttr_firstArg = 0;
 #endif
           if (!CS.paramHasAttr(A - B + paramHasAttr_firstArg,
-                               LLAttribute::NoCapture)) {
+                               llvm::Attribute::AttrKind::NoCapture)) {
             // The parameter is not marked 'nocapture' - captured.
             return false;
           }

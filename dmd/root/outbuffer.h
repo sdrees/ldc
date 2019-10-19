@@ -1,25 +1,19 @@
 
-/* Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+/* Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * All Rights Reserved, written by Walter Bright
  * http://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
- * (See accompanying file LICENSE or copy at http://www.boost.org/LICENSE_1_0.txt)
- * https://github.com/dlang/dmd/blob/master/src/root/outbuffer.h
+ * http://www.boost.org/LICENSE_1_0.txt
+ * https://github.com/dlang/dmd/blob/master/src/dmd/root/outbuffer.h
  */
 
-#ifndef OUTBUFFER_H
-#define OUTBUFFER_H
+#pragma once
 
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <assert.h>
-#include "port.h"
 #include "rmem.h"
-
-#if __DMC__
-#pragma once
-#endif
 
 class RootObject;
 
@@ -50,12 +44,12 @@ public:
         mem.xfree(data);
     }
     char *extractData();
+    void destroy();
 
     void reserve(size_t nbytes);
     void setsize(size_t size);
     void reset();
     void write(const void *data, d_size_t nbytes);
-    void writebstring(utf8_t *string);
     void writestring(const char *string);
     void prependstring(const char *string);
     void writenl();                     // write newline
@@ -77,9 +71,7 @@ public:
     size_t insert(size_t offset, const void *data, size_t nbytes);
     void remove(size_t offset, size_t nbytes);
     // Append terminating null if necessary and get view of internal buffer
-    char *peekString();
+    char *peekChars();
     // Append terminating null if necessary and take ownership of data
-    char *extractString();
+    char *extractChars();
 };
-
-#endif

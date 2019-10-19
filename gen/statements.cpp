@@ -7,11 +7,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "init.h"
-#include "mars.h"
-#include "module.h"
-#include "mtype.h"
-#include "port.h"
+#include "dmd/errors.h"
+#include "dmd/expression.h"
+#include "dmd/hdrgen.h"
+#include "dmd/id.h"
+#include "dmd/identifier.h"
+#include "dmd/import.h"
+#include "dmd/init.h"
+#include "dmd/mangle.h"
+#include "dmd/module.h"
+#include "dmd/mtype.h"
+#include "dmd/root/port.h"
 #include "gen/abi.h"
 #include "gen/arrays.h"
 #include "gen/classes.h"
@@ -25,7 +31,6 @@
 #include "gen/logger.h"
 #include "gen/runtime.h"
 #include "gen/tollvm.h"
-#include "id.h"
 #include "ir/irfunction.h"
 #include "ir/irmodule.h"
 #include "llvm/IR/CFG.h"
@@ -34,13 +39,9 @@
 #include <math.h>
 #include <stdio.h>
 
-// Need to include this after the other DMD includes because of missing
-// dependencies.
-#include "hdrgen.h"
-
 //////////////////////////////////////////////////////////////////////////////
 // FIXME: Integrate these functions
-void AsmStatement_toIR(AsmStatement *stmt, IRState *irs);
+void AsmStatement_toIR(InlineAsmStatement *stmt, IRState *irs);
 void CompoundAsmStatement_toIR(CompoundAsmStatement *stmt, IRState *p);
 
 //////////////////////////////////////////////////////////////////////////////
@@ -103,11 +104,16 @@ public:
       if (!stmt->exp) {
         // implicitly return 0 for the main function
         returnValue = LLConstant::getNullValue(funcType->getReturnType());
+      } else if (f->type->next->toBasetype()->ty == Tvoid && !isMainFunc) {
+        // evaluate expression for side effects
+        assert(stmt->exp->type->toBasetype()->ty == Tvoid);
+        toElemDtor(stmt->exp);
       } else if (funcType->getReturnType()->isVoidTy()) {
-        // if the function's return type is void, it uses sret
+        // if the IR function's return type is void (but not the D one), it uses
+        // sret
         assert(!f->type->isref);
 
-        LLValue *sretPointer = getIrFunc(fd)->sretArg;
+        LLValue *sretPointer = f->sretArg;
         assert(sretPointer);
 
         assert(!f->irFty.arg_sret->rewrite &&
@@ -184,7 +190,7 @@ public:
       }
     } else {
       // no return value expression means it's a void function.
-      assert(funcType->getReturnType() == LLType::getVoidTy(irs->context()));
+      assert(funcType->getReturnType()->isVoidTy());
     }
 
     // If there are no cleanups to run, we try to keep the IR simple and
@@ -249,32 +255,31 @@ public:
     // emit dwarf stop point
     irs->DBuilder.EmitStopPoint(stmt->loc);
 
-    emitCoverageLinecountInc(stmt->loc);
+    if (auto e = stmt->exp) {
+      if (e->hasCode())
+        emitCoverageLinecountInc(stmt->loc);
 
-    if (stmt->exp) {
-      elem *e;
+      DValue *elem;
       // a cast(void) around the expression is allowed, but doesn't require any
       // code
-      if (stmt->exp->op == TOKcast && stmt->exp->type == Type::tvoid) {
-        CastExp *cexp = static_cast<CastExp *>(stmt->exp);
-        e = toElemDtor(cexp->e1);
+      if (e->op == TOKcast && e->type == Type::tvoid) {
+        elem = toElemDtor(static_cast<CastExp *>(e)->e1);
       } else {
-        e = toElemDtor(stmt->exp);
+        elem = toElemDtor(e);
       }
-      delete e;
+      delete elem;
     }
   }
 
   //////////////////////////////////////////////////////////////////////////
-  
+
   bool dcomputeReflectMatches(CallExp *ce) {
     auto arg1 = (DComputeTarget::ID)(*ce->arguments)[0]->toInteger();
     auto arg2 = (*ce->arguments)[1]->toInteger();
     auto dct = irs->dcomputetarget;
     if (!dct) {
       return arg1 == DComputeTarget::Host;
-    }
-    else {
+    } else {
       return arg1 == dct->target &&
              (!arg2 || arg2 == static_cast<dinteger_t>(dct->tversion));
     }
@@ -672,8 +677,8 @@ public:
 
   //////////////////////////////////////////////////////////////////////////
 
-  void visit(OnScopeStatement *stmt) override {
-    stmt->error("Internal Compiler Error: OnScopeStatement should have been "
+  void visit(ScopeGuardStatement *stmt) override {
+    stmt->error("Internal Compiler Error: ScopeGuardStatement should have been "
                 "lowered by frontend.");
     fatal();
   }
@@ -1253,7 +1258,7 @@ public:
 
     // get value for this iteration
     LLValue *loadedKey = irs->ir->CreateLoad(keyvar);
-    LLValue *gep = DtoGEP1(val, loadedKey, true);
+    LLValue *gep = DtoGEP1(val, loadedKey);
 
     if (!stmt->value->isRef() && !stmt->value->isOut()) {
       // Copy value to local variable, and use it as the value variable.
@@ -1554,28 +1559,22 @@ public:
     auto &PGO = irs->funcGen().pgo;
     PGO.setCurrentStmt(stmt);
 
-    Module *const module = irs->func()->decl->getModule();
-
     if (global.params.checkAction == CHECKACTION_C) {
+      auto module = irs->func()->decl->getModule();
       DtoCAssert(module, stmt->loc, DtoConstCString("no switch default"));
       return;
     }
 
-    llvm::Function *fn =
-        getRuntimeFunction(stmt->loc, irs->module, "_d_switch_error");
+    // `stmt->exp` is a CallExpression to `object.__switch_error!()`
+    assert(stmt->exp);
+    toElemDtor(stmt->exp);
 
-    LLValue *moduleInfoSymbol = getIrModule(module)->moduleInfoSymbol();
-    LLType *moduleInfoPtrType = DtoPtrToType(getModuleInfoType());
-
-    LLCallSite call = irs->CreateCallOrInvoke(
-        fn, DtoBitCast(moduleInfoSymbol, moduleInfoPtrType),
-        DtoConstUint(stmt->loc.linnum));
-    call.setDoesNotReturn();
+    gIR->ir->CreateUnreachable();
   }
 
   //////////////////////////////////////////////////////////////////////////
 
-  void visit(AsmStatement *stmt) override {
+  void visit(InlineAsmStatement *stmt) override {
     assert(!irs->dcomputetarget);
     AsmStatement_toIR(stmt, irs);
   }
@@ -1590,7 +1589,10 @@ public:
   //////////////////////////////////////////////////////////////////////////
 
   void visit(ImportStatement *stmt) override {
-    // Empty.
+    for (auto s : *stmt->imports) {
+      assert(s->isImport());
+      irs->DBuilder.EmitImport(static_cast<Import *>(s));
+    }
   }
 
   //////////////////////////////////////////////////////////////////////////

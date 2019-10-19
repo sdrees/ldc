@@ -8,7 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/warnings.h"
-#include "mtype.h"
+
+#include "dmd/errors.h"
+#include "dmd/mtype.h"
 
 void warnInvalidPrintfCall(Loc loc, Expression *arguments, size_t nargs) {
   Expression *arg = arguments;

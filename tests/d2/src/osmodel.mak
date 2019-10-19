@@ -2,7 +2,7 @@
 #
 # Detects and sets the macros:
 #
-#   OS         = one of {osx,linux,freebsd,openbsd,netbsd,solaris}
+#   OS         = one of {osx,linux,freebsd,openbsd,netbsd,dragonflybsd,solaris}
 #   MODEL      = one of { 32, 64 }
 #   MODEL_FLAG = one of { -m32, -m64 }
 #
@@ -61,8 +61,12 @@ ifeq (,$(MODEL))
     MODEL:=32
   endif
   ifeq (,$(MODEL))
-    $(error Cannot figure 32/64 model from uname -m: $(uname_M))
+    $(warning Cannot figure 32/64 model from uname -m: $(uname_M))
   endif
 endif
 
-MODEL_FLAG:=-m$(MODEL)
+ifneq (,$(MODEL))
+  ifneq (default,$(MODEL))
+    MODEL_FLAG:=-m$(MODEL)
+  endif
+endif

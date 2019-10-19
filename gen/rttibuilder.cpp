@@ -8,8 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/rttibuilder.h"
-#include "aggregate.h"
-#include "mtype.h"
+
+#include "dmd/aggregate.h"
+#include "dmd/mangle.h"
+#include "dmd/mtype.h"
 #include "gen/arrays.h"
 #include "gen/functions.h"
 #include "gen/irstate.h"
@@ -19,6 +21,9 @@
 #include "gen/tollvm.h"
 #include "ir/iraggr.h"
 #include "ir/irfunction.h"
+
+// in dmd/opover.d:
+AggregateDeclaration *isAggregate(Type *t);
 
 RTTIBuilder::RTTIBuilder(Type *baseType) {
   const auto ad = isAggregate(baseType);
@@ -40,13 +45,8 @@ RTTIBuilder::RTTIBuilder(Type *baseType) {
 void RTTIBuilder::push(llvm::Constant *C) {
   // We need to explicitly zero any padding bytes as per TDPL §7.1.1 (and
   // also match the struct type lowering code here).
-  const uint64_t fieldStart =
-#if LDC_LLVM_VER >= 309
-    llvm::alignTo
-#else
-    llvm::RoundUpToAlignment
-#endif
-    (prevFieldEnd, gDataLayout->getABITypeAlignment(C->getType()));
+  const uint64_t fieldStart = llvm::alignTo(
+      prevFieldEnd, gDataLayout->getABITypeAlignment(C->getType()));
 
   const uint64_t paddingBytes = fieldStart - prevFieldEnd;
   if (paddingBytes) {
@@ -87,10 +87,10 @@ void RTTIBuilder::push_void_array(llvm::Constant *CI, Type *valtype,
 
   const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, supportsCOMDAT());
 
-  auto G = new LLGlobalVariable(gIR->module, CI->getType(), true,
-                                lwc.first, CI, initname.peekString());
+  auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
+                                initname.peekChars());
   setLinkage(lwc, G);
-  G->setAlignment(DtoAlignment(valtype));
+  G->setAlignment(LLMaybeAlign(DtoAlignment(valtype)));
 
   push_void_array(getTypeAllocSize(CI->getType()), G);
 }
@@ -113,10 +113,10 @@ void RTTIBuilder::push_array(llvm::Constant *CI, uint64_t dim, Type *valtype,
 
   const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, supportsCOMDAT());
 
-  auto G = new LLGlobalVariable(gIR->module, CI->getType(), true,
-                                lwc.first, CI, initname.peekString());
+  auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
+                                initname.peekChars());
   setLinkage(lwc, G);
-  G->setAlignment(DtoAlignment(valtype));
+  G->setAlignment(LLMaybeAlign(DtoAlignment(valtype)));
 
   push_array(dim, DtoBitCast(G, DtoType(valtype->pointerTo())));
 }

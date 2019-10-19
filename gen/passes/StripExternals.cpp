@@ -16,15 +16,18 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "strip-externals"
+#if LDC_LLVM_VER < 700
+#define LLVM_DEBUG DEBUG
+#endif
 
-#include "Passes.h"
-
+#include "gen/passes/Passes.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
-#include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+
 using namespace llvm;
 
 STATISTIC(NumFunctions, "Number of function bodies removed");
@@ -57,14 +60,14 @@ bool StripExternals::runOnModule(Module &M) {
       Changed = true;
       ++NumFunctions;
       if (I->use_empty()) {
-        DEBUG(errs() << "Deleting function: " << *I);
+        LLVM_DEBUG(errs() << "Deleting function: " << *I);
         auto todelete = I;
         ++I;
         todelete->eraseFromParent();
         continue;
       } else {
         I->deleteBody();
-        DEBUG(errs() << "Deleted function body: " << *I);
+        LLVM_DEBUG(errs() << "Deleted function body: " << *I);
       }
     }
     ++I;
@@ -77,7 +80,7 @@ bool StripExternals::runOnModule(Module &M) {
       Changed = true;
       ++NumVariables;
       if (I->use_empty()) {
-        DEBUG(errs() << "Deleting global: " << *I);
+        LLVM_DEBUG(errs() << "Deleting global: " << *I);
         auto todelete = I;
         ++I;
         todelete->eraseFromParent();
@@ -85,7 +88,7 @@ bool StripExternals::runOnModule(Module &M) {
       } else {
         I->setInitializer(nullptr);
         I->setLinkage(GlobalValue::ExternalLinkage);
-        DEBUG(errs() << "Deleted initializer: " << *I);
+        LLVM_DEBUG(errs() << "Deleted initializer: " << *I);
       }
     }
     ++I;

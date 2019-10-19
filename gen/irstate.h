@@ -12,23 +12,23 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_IRSTATE_H
-#define LDC_GEN_IRSTATE_H
+#pragma once
 
+#include "dmd/aggregate.h"
+#include "dmd/root/root.h"
+#include "gen/dibuilder.h"
+#include "gen/objcgen.h"
+#include "ir/iraggr.h"
+#include "ir/irvar.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/IR/CallSite.h"
+#include "llvm/ProfileData/InstrProfReader.h"
 #include <deque>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <vector>
-#include "aggregate.h"
-#include "root.h"
-#include "gen/dibuilder.h"
-#include "gen/objcgen.h"
-#include "ir/iraggr.h"
-#include "ir/irvar.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ProfileData/InstrProfReader.h"
-#include "llvm/IR/CallSite.h"
 
 namespace llvm {
 class LLVMContext;
@@ -54,6 +54,7 @@ class Module;
 class TypeStruct;
 struct BaseClass;
 class AnonDeclaration;
+class StructLiteralExp;
 
 struct IrFunction;
 struct IrModule;
@@ -112,6 +113,13 @@ private:
   std::vector<std::pair<llvm::GlobalVariable *, llvm::Constant *>>
       globalsToReplace;
 
+  // Cache of (possibly bitcast) global variables for taking the address of
+  // struct literal constants. (Also) used to resolve self-references. Must be
+  // cached per IR module: https://github.com/ldc-developers/ldc/issues/2990
+  // [The real key type is `StructLiteralExp *`; a fwd class declaration isn't
+  // enough to use it directly.]
+  llvm::DenseMap<void *, llvm::Constant *> structLiteralConstants;
+
 public:
   IRState(const char *name, llvm::LLVMContext &context);
   ~IRState();
@@ -159,6 +167,10 @@ public:
 
   // create a call or invoke, depending on the landing pad info
   llvm::CallSite CreateCallOrInvoke(LLValue *Callee, const char *Name = "");
+  llvm::CallSite CreateCallOrInvoke(LLValue *Callee,
+                                    llvm::ArrayRef<LLValue *> Args,
+                                    const char *Name = "",
+                                    bool isNothrow = false);
   llvm::CallSite CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
                                     const char *Name = "");
   llvm::CallSite CreateCallOrInvoke(LLValue *Callee, LLValue *Arg1,
@@ -222,6 +234,10 @@ public:
   // setGlobalVarInitializer().
   void replaceGlobals();
 
+  llvm::Constant *getStructLiteralConstant(StructLiteralExp *sle) const;
+  void setStructLiteralConstant(StructLiteralExp *sle,
+                                llvm::Constant *constant);
+
   // List of functions with cpu or features attributes overriden by user
   std::vector<IrFunction *> targetCpuOrFeaturesOverridden;
 
@@ -240,11 +256,9 @@ public:
   llvm::SmallVector<llvm::Metadata *, 5> LinkerMetadataArgs;
 #endif
 
-#if LDC_LLVM_VER >= 308
   // MS C++ compatible type descriptors
   llvm::DenseMap<size_t, llvm::StructType *> TypeDescriptorTypeMap;
   llvm::DenseMap<llvm::Constant *, llvm::GlobalVariable *> TypeDescriptorMap;
-#endif
 
   // Target for dcompute. If not nullptr, it owns this.
   DComputeTarget *dcomputetarget = nullptr;
@@ -253,5 +267,3 @@ public:
 void Statement_toIR(Statement *s, IRState *irs);
 
 bool useMSVCEH();
-
-#endif // LDC_GEN_IRSTATE_H

@@ -2,7 +2,7 @@
  * Compiler implementation of the
  * $(LINK2 http://www.dlang.org, D programming language).
  *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/traits.d, _traits.d)
@@ -17,9 +17,14 @@ import core.stdc.string;
 
 import dmd.aggregate;
 import dmd.arraytypes;
+import dmd.astcodegen;
+import dmd.attrib;
 import dmd.canthrow;
 import dmd.dclass;
 import dmd.declaration;
+import dmd.denum;
+import dmd.dimport;
+import dmd.dmodule;
 import dmd.dscope;
 import dmd.dsymbol;
 import dmd.dsymbolsem;
@@ -35,6 +40,7 @@ import dmd.id;
 import dmd.identifier;
 import dmd.mtype;
 import dmd.nogc;
+import dmd.parse;
 import dmd.root.array;
 import dmd.root.speller;
 import dmd.root.stringtable;
@@ -43,23 +49,11 @@ import dmd.tokens;
 import dmd.typesem;
 import dmd.visitor;
 import dmd.root.rootobject;
+import dmd.root.outbuffer;
 
 enum LOGSEMANTIC = false;
 
 /************************ TraitsExp ************************************/
-
-// callback for TypeFunction::attributesApply
-struct PushAttributes
-{
-    Expressions* mods;
-
-    extern (C++) static int fp(void* param, const(char)* str)
-    {
-        PushAttributes* p = cast(PushAttributes*)param;
-        p.mods.push(new StringExp(Loc.initial, cast(char*)str));
-        return 0;
-    }
-}
 
 /**************************************
  * Convert `Expression` or `Type` to corresponding `Dsymbol`, additionally
@@ -93,7 +87,7 @@ private Dsymbol getDsymbolWithoutExpCtx(RootObject oarg)
     return getDsymbol(oarg);
 }
 
-extern (C++) __gshared StringTable traitsStringTable;
+private __gshared StringTable traitsStringTable;
 
 shared static this()
 {
@@ -119,6 +113,8 @@ shared static this()
         "isFinalFunction",
         "isOverrideFunction",
         "isStaticFunction",
+        "isModule",
+        "isPackage",
         "isRef",
         "isOut",
         "isLazy",
@@ -146,13 +142,16 @@ shared static this()
         "getUnitTests",
         "getVirtualIndex",
         "getPointerBitmap",
+        "isZeroInit",
+        "getTargetInfo",
+        "getLocation",
     ];
 
-    traitsStringTable._init(40);
+    traitsStringTable._init(names.length);
 
     foreach (s; names)
     {
-        auto sv = traitsStringTable.insert(s.ptr, s.length, cast(void*)s.ptr);
+        auto sv = traitsStringTable.insert(s, cast(void*)s.ptr);
         assert(sv);
     }
 }
@@ -162,7 +161,7 @@ shared static this()
  *  if interpreted as the type given as argument
  * Returns: the size of the type in bytes, d_uns64.max on error
  */
-extern (C++) d_uns64 getTypePointerBitmap(Loc loc, Type t, Array!(d_uns64)* data)
+d_uns64 getTypePointerBitmap(Loc loc, Type t, Array!(d_uns64)* data)
 {
     d_uns64 sz;
     if (t.ty == Tclass && !(cast(TypeClass)t).sym.isInterfaceDeclaration())
@@ -385,7 +384,7 @@ extern (C++) d_uns64 getTypePointerBitmap(Loc loc, Type t, Array!(d_uns64)* data
  *
  *  Returns: [T.sizeof, pointerbit0-31/63, pointerbit32/64-63/128, ...]
  */
-extern (C++) Expression pointerBitmap(TraitsExp e)
+private Expression pointerBitmap(TraitsExp e)
 {
     if (!e.args || e.args.dim != 1)
     {
@@ -405,17 +404,16 @@ extern (C++) Expression pointerBitmap(TraitsExp e)
     if (sz == d_uns64.max)
         return new ErrorExp();
 
-    auto exps = new Expressions();
-    exps.push(new IntegerExp(e.loc, sz, Type.tsize_t));
-    foreach (d_uns64 i; 0 .. data.dim)
-        exps.push(new IntegerExp(e.loc, data[cast(size_t)i], Type.tsize_t));
+    auto exps = new Expressions(data.dim + 1);
+    (*exps)[0] = new IntegerExp(e.loc, sz, Type.tsize_t);
+    foreach (size_t i; 1 .. exps.dim)
+        (*exps)[i] = new IntegerExp(e.loc, data[cast(size_t) (i - 1)], Type.tsize_t);
 
-    auto ale = new ArrayLiteralExp(e.loc, exps);
-    ale.type = Type.tsize_t.sarrayOf(data.dim + 1);
+    auto ale = new ArrayLiteralExp(e.loc, Type.tsize_t.sarrayOf(data.dim + 1), exps);
     return ale;
 }
 
-extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
+Expression semanticTraits(TraitsExp e, Scope* sc)
 {
     static if (LOGSEMANTIC)
     {
@@ -425,7 +423,8 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
     if (e.ident != Id.compiles &&
         e.ident != Id.isSame &&
         e.ident != Id.identifier &&
-        e.ident != Id.getProtection)
+        e.ident != Id.getProtection &&
+        e.ident != Id.getAttributes)
     {
         if (!TemplateInstance.semanticTiargs(e.loc, sc, e.args, 1))
             return new ErrorExp();
@@ -490,7 +489,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         return null;
     }
 
-    IntegerExp isX(T)(bool function(T) fp)
+    IntegerExp isX(T)(bool delegate(T) fp)
     {
         if (!dim)
             return False();
@@ -511,6 +510,8 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 auto y = s.isDeclaration();
             static if (is(T == FuncDeclaration))
                 auto y = s.isFuncDeclaration();
+            static if (is(T == EnumMember))
+                auto y = s.isEnumMember();
 
             if (!y || !fp(y))
                 return False();
@@ -522,6 +523,15 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
     alias isDsymX = isX!Dsymbol;
     alias isDeclX = isX!Declaration;
     alias isFuncX = isX!FuncDeclaration;
+    alias isEnumMemX = isX!EnumMember;
+
+    Expression isPkgX(bool function(Package) fp)
+    {
+        return isDsymX((Dsymbol sym) {
+            Package p = resolveIsPackage(sym);
+            return (p !is null) && fp(p);
+        });
+    }
 
     if (e.ident == Id.isArithmetic)
     {
@@ -635,7 +645,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         if (dim != 1)
             return dimError(1);
 
-        return isFuncX(f => f.isDisabled());
+        return isDeclX(f => f.isDisabled());
     }
     if (e.ident == Id.isAbstractFunction)
     {
@@ -679,6 +689,20 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
 
         return isFuncX(f => !f.needThis() && !f.isNested());
     }
+    if (e.ident == Id.isModule)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        return isPkgX(p => p.isModule() || p.isPackageMod());
+    }
+    if (e.ident == Id.isPackage)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        return isPkgX(p => p.isModule() is null);
+    }
     if (e.ident == Id.isRef)
     {
         if (dim != 1)
@@ -716,8 +740,12 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         Identifier id;
         if (auto po = isParameter(o))
         {
+            if (!po.ident)
+            {
+                e.error("argument `%s` has no identifier", po.type.toChars());
+                return new ErrorExp();
+            }
             id = po.ident;
-            assert(id);
         }
         else
         {
@@ -739,7 +767,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             return dimError(1);
 
         Scope* sc2 = sc.push();
-        sc2.flags = sc.flags | SCOPE.noaccesscheck;
+        sc2.flags = sc.flags | SCOPE.noaccesscheck | SCOPE.ignoresymbolvisibility;
         bool ok = TemplateInstance.semanticTiargs(e.loc, sc2, e.args, 1);
         sc2.pop();
         if (!ok)
@@ -784,7 +812,12 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                     if (auto p = s.toParent())         // `C`'s parent is `C!2`, believe it or not
                     {
                         if (p.isTemplateInstance())    // `C!2` is a template instance
+                        {
                             s = p;                     // `C!2`'s parent is `T1`
+                            auto td = (cast(TemplateInstance)p).tempdecl;
+                            if (td)
+                                s = td;                // get the declaration context just in case there's two contexts
+                        }
                     }
                 }
             }
@@ -817,7 +850,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 return ex.expressionSemantic(sc);
             }
         }
-        return resolve(e.loc, sc, s, false);
+        return symbolToExp(s, e.loc, sc, false);
     }
     if (e.ident == Id.hasMember ||
         e.ident == Id.getMember ||
@@ -825,7 +858,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         e.ident == Id.getVirtualMethods ||
         e.ident == Id.getVirtualFunctions)
     {
-        if (dim != 2)
+        if (dim != 2 && !(dim == 3 && e.ident == Id.getOverloads))
             return dimError(2);
 
         auto o = (*e.args)[0];
@@ -836,6 +869,19 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             return new ErrorExp();
         }
         ex = ex.ctfeInterpret();
+
+        bool includeTemplates = false;
+        if (dim == 3 && e.ident == Id.getOverloads)
+        {
+            auto b = isExpression((*e.args)[2]);
+            b = b.ctfeInterpret();
+            if (!b.type.equals(Type.tbool))
+            {
+                e.error("`bool` expected as third argument of `__traits(getOverloads)`, not `%s` of type `%s`", b.toChars(), b.type.toChars());
+                return new ErrorExp();
+            }
+            includeTemplates = b.isBool(true);
+        }
 
         StringExp se = ex.toStringExp();
         if (!se || se.len == 0)
@@ -875,9 +921,9 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             return new ErrorExp();
         }
 
-        // ignore symbol visibility for these traits, should disable access checks as well
+        // ignore symbol visibility and disable access checks for these traits
         Scope* scx = sc.push();
-        scx.flags |= SCOPE.ignoresymbolvisibility;
+        scx.flags |= SCOPE.ignoresymbolvisibility | SCOPE.noaccesscheck;
         scope (exit) scx.pop();
 
         if (e.ident == Id.hasMember)
@@ -904,12 +950,11 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             ex = ex.expressionSemantic(scx);
             if (errors < global.errors)
                 e.error("`%s` cannot be resolved", eorig.toChars());
-            //ex.print();
 
             /* Create tuple of functions of ex
              */
             auto exps = new Expressions();
-            FuncDeclaration f;
+            Dsymbol f;
             if (ex.op == TOK.variable)
             {
                 VarExp ve = cast(VarExp)ex;
@@ -925,9 +970,49 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 else
                     ex = dve.e1;
             }
-
-            overloadApply(f, (Dsymbol s)
+            else if (ex.op == TOK.template_)
             {
+                VarExp ve = cast(VarExp)ex;
+                auto td = ve.var.isTemplateDeclaration();
+                f = td;
+                if (td && td.funcroot)
+                    f = td.funcroot;
+                ex = null;
+            }
+
+            bool[string] funcTypeHash;
+
+            /* Compute the function signature and insert it in the
+             * hashtable, if not present. This is needed so that
+             * traits(getOverlods, F3, "visit") does not count `int visit(int)`
+             * twice in the following example:
+             *
+             * =============================================
+             * interface F1 { int visit(int);}
+             * interface F2 { int visit(int); void visit(); }
+             * interface F3 : F2, F1 {}
+             *==============================================
+             */
+            void insertInterfaceInheritedFunction(FuncDeclaration fd, Expression e)
+            {
+                auto funcType = fd.type.toChars();
+                auto len = strlen(funcType);
+                string signature = funcType[0 .. len].idup;
+                //printf("%s - %s\n", fd.toChars, signature);
+                if (signature !in funcTypeHash)
+                {
+                    funcTypeHash[signature] = true;
+                    exps.push(e);
+                }
+            }
+
+            int dg(Dsymbol s)
+            {
+                if (includeTemplates)
+                {
+                    exps.push(new DsymbolExp(Loc.initial, s, false));
+                    return 0;
+                }
                 auto fd = s.isFuncDeclaration();
                 if (!fd)
                     return 0;
@@ -942,9 +1027,31 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 auto e = ex ? new DotVarExp(Loc.initial, ex, fa, false)
                             : new DsymbolExp(Loc.initial, fa, false);
 
-                exps.push(e);
+                // if the parent is an interface declaration
+                // we must check for functions with the same signature
+                // in different inherited interfaces
+                if (sym && sym.isInterfaceDeclaration())
+                    insertInterfaceInheritedFunction(fd, e);
+                else
+                    exps.push(e);
                 return 0;
-            });
+            }
+
+            InterfaceDeclaration ifd = null;
+            if (sym)
+                ifd = sym.isInterfaceDeclaration();
+            // If the symbol passed as a parameter is an
+            // interface that inherits other interfaces
+            overloadApply(f, &dg);
+            if (ifd && ifd.interfaces && f)
+            {
+                // check the overloads of each inherited interface individually
+                foreach (bc; ifd.interfaces)
+                {
+                    if (auto fd = bc.sym.search(e.loc, f.ident))
+                        overloadApply(fd, &dg);
+                }
+            }
 
             auto tup = new TupleExp(e.loc, exps);
             return tup.expressionSemantic(scx);
@@ -985,14 +1092,9 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         auto o = (*e.args)[0];
         auto s = getDsymbol(o);
         auto ad = s ? s.isAggregateDeclaration() : null;
-        if (!ad)
-        {
-            e.error("argument is not an aggregate type");
-            return new ErrorExp();
-        }
 
         auto exps = new Expressions();
-        if (ad.aliasthis)
+        if (ad && ad.aliasthis)
             exps.push(new StringExp(e.loc, cast(char*)ad.aliasthis.ident.toChars()));
         Expression ex = new TupleExp(e.loc, exps);
         ex = ex.expressionSemantic(sc);
@@ -1000,12 +1102,34 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
     }
     if (e.ident == Id.getAttributes)
     {
+        /* Specify 0 for bit 0 of the flags argument to semanticTiargs() so that
+         * a symbol should not be folded to a constant.
+         * Bit 1 means don't convert Parameter to Type if Parameter has an identifier
+         */
+        if (!TemplateInstance.semanticTiargs(e.loc, sc, e.args, 3))
+            return new ErrorExp();
+
         if (dim != 1)
             return dimError(1);
 
         auto o = (*e.args)[0];
+        auto po = isParameter(o);
         auto s = getDsymbolWithoutExpCtx(o);
-        if (!s)
+        UserAttributeDeclaration udad = null;
+        if (po)
+        {
+            udad = po.userAttribDecl;
+        }
+        else if (s)
+        {
+            if (s.isImport())
+            {
+                s = s.isImport().mod;
+            }
+            //printf("getAttributes %s, attrs = %p, scope = %p\n", s.toChars(), s.userAttribDecl, s.scope);
+            udad = s.userAttribDecl;
+        }
+        else
         {
             version (none)
             {
@@ -1019,13 +1143,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             e.error("first argument is not a symbol");
             return new ErrorExp();
         }
-        if (auto imp = s.isImport())
-        {
-            s = imp.mod;
-        }
 
-        //printf("getAttributes %s, attrs = %p, scope = %p\n", s.toChars(), s.userAttribDecl, s.scope);
-        auto udad = s.userAttribDecl;
         auto exps = udad ? udad.getAttributes() : new Expressions();
         auto tup = new TupleExp(e.loc, exps);
         return tup.expressionSemantic(sc);
@@ -1048,10 +1166,13 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         }
 
         auto mods = new Expressions();
-        PushAttributes pa;
-        pa.mods = mods;
-        tf.modifiersApply(&pa, &PushAttributes.fp);
-        tf.attributesApply(&pa, &PushAttributes.fp, TRUSTformatSystem);
+
+        void addToMods(string str)
+        {
+            mods.push(new StringExp(Loc.initial, cast(char*)str.ptr, str.length));
+        }
+        tf.modifiersApply(&addToMods);
+        tf.attributesApply(&addToMods, TRUSTformatSystem);
 
         auto tup = new TupleExp(e.loc, mods);
         return tup.expressionSemantic(sc);
@@ -1074,7 +1195,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             return new ErrorExp();
         }
 
-        bool value = Target.isReturnOnStack(tf);
+        bool value = target.isReturnOnStack(tf, fd && fd.needThis());
         return new IntegerExp(e.loc, value, Type.tbool);
     }
     if (e.ident == Id.getFunctionVariadicStyle)
@@ -1090,7 +1211,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             return dimError(1);
 
         LINK link;
-        int varargs;
+        VarArg varargs;
         auto o = (*e.args)[0];
 
         FuncDeclaration fd;
@@ -1099,7 +1220,7 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         if (tf)
         {
             link = tf.linkage;
-            varargs = tf.varargs;
+            varargs = tf.parameterList.varargs;
         }
         else
         {
@@ -1109,17 +1230,16 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 return new ErrorExp();
             }
             link = fd.linkage;
-            fd.getParameters(&varargs);
+            varargs = fd.getParameterList().varargs;
         }
         string style;
-        switch (varargs)
+        final switch (varargs)
         {
-            case 0: style = "none";                       break;
-            case 1: style = (link == LINK.d) ? "argptr"
-                                             : "stdarg";  break;
-            case 2:     style = "typesafe";               break;
-            default:
-                assert(0);
+            case VarArg.none:     style = "none";           break;
+            case VarArg.variadic: style = (link == LINK.d)
+                                             ? "argptr"
+                                             : "stdarg";    break;
+            case VarArg.typesafe: style = "typesafe";       break;
         }
         auto se = new StringExp(e.loc, cast(char*)style);
         return se.expressionSemantic(sc);
@@ -1139,20 +1259,16 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         FuncDeclaration fd;
         TypeFunction tf = toTypeFunction(o, fd);
 
-        Parameters* fparams;
+        ParameterList fparams;
         if (tf)
-        {
-            fparams = tf.parameters;
-        }
+            fparams = tf.parameterList;
+        else if (fd)
+            fparams = fd.getParameterList();
         else
         {
-            if (!fd)
-            {
-                e.error("first argument to `__traits(getParameterStorageClasses, %s, %s)` is not a function",
-                    o.toChars(), o1.toChars());
-                return new ErrorExp();
-            }
-            fparams = fd.getParameters(null);
+            e.error("first argument to `__traits(getParameterStorageClasses, %s, %s)` is not a function",
+                o.toChars(), o1.toChars());
+            return new ErrorExp();
         }
 
         StorageClass stc;
@@ -1167,14 +1283,14 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         }
         ex = ex.ctfeInterpret();
         auto ii = ex.toUInteger();
-        if (ii >= Parameter.dim(fparams))
+        if (ii >= fparams.length)
         {
-            e.error("parameter index must be in range 0..%u not %s", cast(uint)Parameter.dim(fparams), ex.toChars());
+            e.error("parameter index must be in range 0..%u not %s", cast(uint)fparams.length, ex.toChars());
             return new ErrorExp();
         }
 
         uint n = cast(uint)ii;
-        Parameter p = Parameter.getNth(fparams, n);
+        Parameter p = fparams[n];
         stc = p.storageClass;
 
         // This mirrors hdrgen.visit(Parameter p)
@@ -1236,12 +1352,26 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         {
             auto s = getDsymbol(o);
             Declaration d;
-            if (!s || (d = s.isDeclaration()) is null)
+            AggregateDeclaration agg;
+            if (!s || ((d = s.isDeclaration()) is null && (agg = s.isAggregateDeclaration()) is null))
             {
                 e.error("argument to `__traits(getLinkage, %s)` is not a declaration", o.toChars());
                 return new ErrorExp();
             }
-            link = d.linkage;
+            if (d !is null)
+                link = d.linkage;
+            else final switch (agg.classKind)
+            {
+                case ClassKind.d:
+                    link = LINK.d;
+                    break;
+                case ClassKind.cpp:
+                    link = LINK.cpp;
+                    break;
+                case ClassKind.objc:
+                    link = LINK.objc;
+                    break;
+            }
         }
         auto linkage = linkageToChars(link);
         auto se = new StringExp(e.loc, cast(char*)linkage);
@@ -1392,33 +1522,69 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
             bool err = false;
 
             auto t = isType(o);
-            auto ex = t ? t.typeToExpression() : isExpression(o);
-            if (!ex && t)
+            while (t)
             {
-                Dsymbol s;
-                t.resolve(e.loc, sc2, &ex, &t, &s);
-                if (t)
+                if (auto tm = t.isTypeMixin())
                 {
-                    t.typeSemantic(e.loc, sc2);
-                    if (t.ty == Terror)
+                    /* The mixin string could be a type or an expression.
+                     * Have to try compiling it to see.
+                     */
+                    OutBuffer buf;
+                    if (expressionsToString(buf, sc, tm.exps))
+                    {
+                        err = true;
+                        break;
+                    }
+                    const len = buf.offset;
+                    const str = buf.extractChars()[0 .. len];
+                    scope diagnosticReporter = new StderrDiagnosticReporter(global.params.useDeprecated);
+                    scope p = new Parser!ASTCodegen(e.loc, sc._module, str, false, diagnosticReporter);
+                    p.nextToken();
+                    //printf("p.loc.linnum = %d\n", p.loc.linnum);
+
+                    o = p.parseTypeOrAssignExp();
+                    if (p.errors ||
+                        p.token.value != TOK.endOfFile)
+                    {
+                        err = true;
+                        break;
+                    }
+                    t = o.isType();
+                }
+                else
+                    break;
+            }
+
+            if (!err)
+            {
+                auto ex = t ? t.typeToExpression() : isExpression(o);
+                if (!ex && t)
+                {
+                    Dsymbol s;
+                    t.resolve(e.loc, sc2, &ex, &t, &s);
+                    if (t)
+                    {
+                        t.typeSemantic(e.loc, sc2);
+                        if (t.ty == Terror)
+                            err = true;
+                    }
+                    else if (s && s.errors)
                         err = true;
                 }
-                else if (s && s.errors)
-                    err = true;
-            }
-            if (ex)
-            {
-                ex = ex.expressionSemantic(sc2);
-                ex = resolvePropertiesOnly(sc2, ex);
-                ex = ex.optimize(WANTvalue);
-                if (sc2.func && sc2.func.type.ty == Tfunction)
+                if (ex)
                 {
-                    const tf = cast(TypeFunction)sc2.func.type;
-                    err |= tf.isnothrow && canThrow(ex, sc2.func, false);
+                    ex = ex.expressionSemantic(sc2);
+                    ex = resolvePropertiesOnly(sc2, ex);
+                    ex = ex.optimize(WANTvalue);
+                    if (sc2.func && sc2.func.type.ty == Tfunction)
+                    {
+                        const tf = cast(TypeFunction)sc2.func.type;
+                        err |= tf.isnothrow && canThrow(ex, sc2.func, false);
+                    }
+                    ex = checkGC(sc2, ex);
+                    if (ex.op == TOK.error)
+                        err = true;
                 }
-                ex = checkGC(sc2, ex);
-                if (ex.op == TOK.error)
-                    err = true;
             }
 
             // Carefully detach the scope from the parent and throw it away as
@@ -1482,6 +1648,12 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
                 return True();
         }
 
+        // issue 12001, allow isSame, <BasicType>, <BasicType>
+        Type t1 = isType(o1);
+        Type t2 = isType(o2);
+        if (t1 && t2 && t1.equals(t2))
+            return True();
+
         auto s1 = getDsymbol(o1);
         auto s2 = getDsymbol(o2);
         //printf("isSame: %s, %s\n", o1.toChars(), o2.toChars());
@@ -1532,7 +1704,36 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         if (cmp(s1,s2) || cmp(s2,s1))
             return True();
 
-        return (s1 == s2) ? True() : False();
+        if (s1 == s2)
+            return True();
+
+        // https://issues.dlang.org/show_bug.cgi?id=18771
+        // OverloadSets are equal if they contain the same functions
+        auto overSet1 = s1.isOverloadSet();
+        if (!overSet1)
+            return False();
+
+        auto overSet2 = s2.isOverloadSet();
+        if (!overSet2)
+            return False();
+
+        if (overSet1.a.dim != overSet2.a.dim)
+            return False();
+
+        // OverloadSets contain array of Dsymbols => O(n*n)
+        // to compare for equality as the order of overloads
+        // might not be the same
+Lnext:
+        foreach(overload1; overSet1.a)
+        {
+            foreach(overload2; overSet2.a)
+            {
+                if (overload1 == overload2)
+                    continue Lnext;
+            }
+            return False();
+        }
+        return True();
     }
     if (e.ident == Id.getUnitTests)
     {
@@ -1563,34 +1764,28 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
         {
             bool[void*] uniqueUnitTests;
 
-            void collectUnitTests(Dsymbols* a)
+            void symbolDg(Dsymbol s)
             {
-                if (!a)
-                    return;
-                foreach (s; *a)
+                if (auto ad = s.isAttribDeclaration())
                 {
-                    if (auto atd = s.isAttribDeclaration())
-                    {
-                        collectUnitTests(atd.include(null));
-                        continue;
-                    }
-                    if (auto ud = s.isUnitTestDeclaration())
-                    {
-                        if (cast(void*)ud in uniqueUnitTests)
-                            continue;
+                    ad.include(null).foreachDsymbol(&symbolDg);
+                }
+                else if (auto ud = s.isUnitTestDeclaration())
+                {
+                    if (cast(void*)ud in uniqueUnitTests)
+                        return;
 
-                        auto ad = new FuncAliasDeclaration(ud.ident, ud, false);
-                        ad.protection = ud.protection;
+                    uniqueUnitTests[cast(void*)ud] = true;
 
-                        auto e = new DsymbolExp(Loc.initial, ad, false);
-                        exps.push(e);
+                    auto ad = new FuncAliasDeclaration(ud.ident, ud, false);
+                    ad.protection = ud.protection;
 
-                        uniqueUnitTests[cast(void*)ud] = true;
-                    }
+                    auto e = new DsymbolExp(Loc.initial, ad, false);
+                    exps.push(e);
                 }
             }
 
-            collectUnitTests(sds.members);
+            sds.members.foreachDsymbol(&symbolDg);
         }
         auto te = new TupleExp(e.loc, exps);
         return te.expressionSemantic(sc);
@@ -1617,23 +1812,95 @@ extern (C++) Expression semanticTraits(TraitsExp e, Scope* sc)
     {
         return pointerBitmap(e);
     }
+version (IN_LLVM)
+{
     if (Expression ret = semanticTraitsHook(e, sc))
     {
         return ret;
     }
-
-    extern (D) void* trait_search_fp(const(char)* seed, ref int cost)
+}
+    if (e.ident == Id.isZeroInit)
     {
-        //printf("trait_search_fp('%s')\n", seed);
-        size_t len = strlen(seed);
-        if (!len)
-            return null;
-        cost = 0;
-        StringValue* sv = traitsStringTable.lookup(seed, len);
-        return sv ? sv.ptrvalue : null;
+        if (dim != 1)
+            return dimError(1);
+
+        auto o = (*e.args)[0];
+        Type t = isType(o);
+        if (!t)
+        {
+            e.error("type expected as second argument of __traits `%s` instead of `%s`",
+                e.ident.toChars(), o.toChars());
+            return new ErrorExp();
+        }
+
+        Type tb = t.baseElemOf();
+        return tb.isZeroInit(e.loc) ? True() : False();
+    }
+    if (e.ident == Id.getTargetInfo)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        auto ex = isExpression((*e.args)[0]);
+        StringExp se = ex ? ex.ctfeInterpret().toStringExp() : null;
+        if (!ex || !se || se.len == 0)
+        {
+            e.error("string expected as argument of __traits `%s` instead of `%s`", e.ident.toChars(), ex.toChars());
+            return new ErrorExp();
+        }
+        se = se.toUTF8(sc);
+
+        Expression r = target.getTargetInfo(se.toPtr(), e.loc);
+        if (!r)
+        {
+            e.error("`getTargetInfo` key `\"%s\"` not supported by this implementation", se.toPtr());
+            return new ErrorExp();
+        }
+        return r.expressionSemantic(sc);
+    }
+    if (e.ident == Id.getLocation)
+    {
+        if (dim != 1)
+            return dimError(1);
+        auto arg0 = (*e.args)[0];
+        Dsymbol s = getDsymbolWithoutExpCtx(arg0);
+        if (!s || !s.loc.isValid())
+        {
+            e.error("can only get the location of a symbol, not `%s`", arg0.toChars());
+            return new ErrorExp();
+        }
+
+        const fd = s.isFuncDeclaration();
+        // FIXME:td.overnext is always set, even when using an index on it
+        //const td = s.isTemplateDeclaration();
+        if ((fd && fd.overnext) /*|| (td && td.overnext)*/)
+        {
+            e.error("cannot get location of an overload set, " ~
+                    "use `__traits(getOverloads, ..., \"%s\"%s)[N]` " ~
+                    "to get the Nth overload",
+                    arg0.toChars(), /*td ? ", true".ptr :*/ "".ptr);
+            return new ErrorExp();
+        }
+
+        auto exps = new Expressions(3);
+        exps.data[0] = new StringExp(e.loc, cast(void*)s.loc.filename, strlen(s.loc.filename));
+        exps.data[1] = new IntegerExp(e.loc, s.loc.linnum,Type.tint32);
+        exps.data[2] = new IntegerExp(e.loc, s.loc.charnum,Type.tint32);
+        auto tup = new TupleExp(e.loc, exps);
+        return tup.expressionSemantic(sc);
     }
 
-    if (auto sub = cast(const(char)*)speller(e.ident.toChars(), &trait_search_fp, idchars))
+    extern (D) const(char)* trait_search_fp(const(char)[] seed, ref int cost)
+    {
+        //printf("trait_search_fp('%s')\n", seed);
+        if (!seed.length)
+            return null;
+        cost = 0;
+        StringValue* sv = traitsStringTable.lookup(seed);
+        return sv ? cast(const(char)*)sv.ptrvalue : null;
+    }
+
+    if (auto sub = speller!trait_search_fp(e.ident.toString()))
         e.error("unrecognized trait `%s`, did you mean `%s`?", e.ident.toChars(), sub);
     else
         e.error("unrecognized trait `%s`", e.ident.toChars());

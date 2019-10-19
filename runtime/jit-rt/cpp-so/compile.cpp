@@ -18,35 +18,24 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_map>
 
+#include "bind.h"
 #include "callback_ostream.h"
 #include "context.h"
-#include "disassembler.h"
+#include "jit_context.h"
 #include "optimizer.h"
+#include "options.h"
 #include "utils.h"
 
 #include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/JITSymbol.h"
-#include "llvm/ExecutionEngine/Orc/CompileUtils.h"
-#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
-#include "llvm/ExecutionEngine/Orc/LambdaResolver.h"
-#include "llvm/ExecutionEngine/Orc/ObjectTransformLayer.h"
-#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
-#include "llvm/ExecutionEngine/RuntimeDyld.h"
-#include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/Linker/Linker.h"
-#include "llvm/Support/DynamicLibrary.h"
-#include "llvm/Support/Host.h"
-#include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/Cloning.h"
-
-#if LDC_LLVM_VER >= 700
-#include "llvm/ExecutionEngine/Orc/Legacy.h"
-#endif
 
 namespace {
 
@@ -55,6 +44,7 @@ namespace {
 struct RtCompileFuncList {
   const char *name;
   void **func;
+  void *originalFunc;
 };
 
 struct RtCompileSymList {
@@ -82,248 +72,94 @@ struct RtCompileModuleList {
 
 #pragma pack(pop)
 
-llvm::SmallVector<std::string, 4> getHostAttrs() {
-  llvm::SmallVector<std::string, 4> features;
-  llvm::StringMap<bool> hostFeatures;
-  if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
-    for (auto &&f : hostFeatures) {
-      features.push_back(((f.second ? "+" : "-") + f.first()).str());
-    }
-  }
-  return features;
-}
-
-using SymMap = std::map<std::string, void *>;
-
-struct llvm_init_obj {
-  llvm_init_obj() {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetDisassembler();
-    llvm::InitializeNativeTargetAsmPrinter();
-  }
-};
-
-std::string decorate(const std::string &name) {
-#if defined(__APPLE__)
-  return "_" + name;
-#elif defined(_WIN32) && defined(_M_IX86)
-  assert(!name.empty());
-  if (0x1 == name[0]) {
-    return name.substr(1);
-  }
-  return "_" + name;
-#else
-  return name;
-#endif
-}
-
-auto getSymbolInProcess(const std::string &name)
-    -> decltype(llvm::RTDyldMemoryManager::getSymbolAddressInProcess(name)) {
-  assert(!name.empty());
-#if defined(_WIN32)
-  if ('_' == name[0]) {
-    return llvm::RTDyldMemoryManager::getSymbolAddressInProcess(name.substr(1));
-  }
-  return llvm::RTDyldMemoryManager::getSymbolAddressInProcess(name);
-#else
-  return llvm::RTDyldMemoryManager::getSymbolAddressInProcess(name);
-#endif
-}
-
-struct ModuleListener {
-  llvm::TargetMachine &targetmachine;
-  llvm::raw_ostream *stream = nullptr;
-
-  ModuleListener(llvm::TargetMachine &tm) : targetmachine(tm) {}
-
-  template <typename T> auto operator()(T &&object) -> T {
-    if (nullptr != stream) {
-      disassemble(targetmachine, *object->getBinary(), *stream);
-    }
-    return std::move(object);
-  }
-};
-
-class MyJIT {
-private:
-  llvm_init_obj initObj;
-  llvm::llvm_shutdown_obj shutdownObj;
-  std::unique_ptr<llvm::TargetMachine> targetmachine;
-  const llvm::DataLayout dataLayout;
-  using ObjectLayerT = llvm::orc::RTDyldObjectLinkingLayer;
-  using ListenerLayerT =
-      llvm::orc::ObjectTransformLayer<ObjectLayerT, ModuleListener>;
-  using CompileLayerT =
-      llvm::orc::IRCompileLayer<ListenerLayerT, llvm::orc::SimpleCompiler>;
-#if LDC_LLVM_VER >= 700
-  using ModuleHandleT = llvm::orc::VModuleKey;
-  llvm::orc::SymbolStringPool stringPool;
-  llvm::orc::ExecutionSession execSession;
-  std::shared_ptr<llvm::orc::SymbolResolver> resolver;
-#else
-  using ModuleHandleT = CompileLayerT::ModuleHandleT;
-#endif
-  ObjectLayerT objectLayer;
-  ListenerLayerT listenerlayer;
-  CompileLayerT compileLayer;
-  llvm::LLVMContext context;
-  bool compiled = false;
-  ModuleHandleT moduleHandle;
-  SymMap symMap;
-
-  struct ListenerCleaner final {
-    MyJIT &owner;
-    ListenerCleaner(MyJIT &o, llvm::raw_ostream *stream) : owner(o) {
-      owner.listenerlayer.getTransform().stream = stream;
-    }
-    ~ListenerCleaner() { owner.listenerlayer.getTransform().stream = nullptr; }
-  };
-
-public:
-  MyJIT()
-      : targetmachine(llvm::EngineBuilder().selectTarget(
-            llvm::Triple(llvm::sys::getProcessTriple()), llvm::StringRef(),
-            llvm::sys::getHostCPUName(), getHostAttrs())),
-        dataLayout(targetmachine->createDataLayout()),
-#if LDC_LLVM_VER >= 700
-        execSession(stringPool), resolver(createResolver()),
-        objectLayer(execSession,
-                    [this](llvm::orc::VModuleKey) {
-                      return llvm::orc::RTDyldObjectLinkingLayer::Resources{
-                          std::make_shared<llvm::SectionMemoryManager>(),
-                          resolver};
-                    }),
-#else
-        objectLayer(
-            []() { return std::make_shared<llvm::SectionMemoryManager>(); }),
-#endif
-        listenerlayer(objectLayer, ModuleListener(*targetmachine)),
-        compileLayer(listenerlayer, llvm::orc::SimpleCompiler(*targetmachine)) {
-    llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
-  }
-
-  llvm::TargetMachine &getTargetMachine() { return *targetmachine; }
-
-  bool addModule(std::unique_ptr<llvm::Module> module,
-                 llvm::raw_ostream *asmListener) {
-    assert(nullptr != module);
-    reset();
-
-    ListenerCleaner cleaner(*this, asmListener);
-    // Add the set to the JIT with the resolver we created above
-#if LDC_LLVM_VER >= 700
-    auto handle = execSession.allocateVModule();
-    auto result = compileLayer.addModule(handle, std::move(module));
-    if (result) {
-      execSession.releaseVModule(handle);
-      return true;
-    }
-    moduleHandle = handle;
-#else
-    auto result = compileLayer.addModule(std::move(module), createResolver());
-    if (!result) {
-      return true;
-    }
-    moduleHandle = result.get();
-#endif
-    compiled = true;
-    return false;
-  }
-
-  llvm::JITSymbol findSymbol(const std::string &name) {
-    return compileLayer.findSymbol(name, false);
-  }
-
-  llvm::LLVMContext &getContext() { return context; }
-
-  SymMap &getSymMap() { return symMap; }
-
-  void reset() {
-    if (compiled) {
-      removeModule(moduleHandle);
-      moduleHandle = {};
-      compiled = false;
-    }
-  }
-
-private:
-  void removeModule(const ModuleHandleT &handle) {
-    cantFail(compileLayer.removeModule(handle));
-#if LDC_LLVM_VER >= 700
-    execSession.releaseVModule(handle);
-#endif
-  }
-
-#if LDC_LLVM_VER >= 700
-  std::shared_ptr<llvm::orc::SymbolResolver> createResolver() {
-    return llvm::orc::createLegacyLookupResolver(
-        [this](const std::string &name) -> llvm::JITSymbol {
-          if (auto Sym = compileLayer.findSymbol(name, false)) {
-            return Sym;
-          } else if (auto Err = Sym.takeError()) {
-            return std::move(Err);
-          }
-          auto it = symMap.find(name);
-          if (symMap.end() != it) {
-            return llvm::JITSymbol(
-                reinterpret_cast<llvm::JITTargetAddress>(it->second),
-                llvm::JITSymbolFlags::Exported);
-          }
-          if (auto SymAddr = getSymbolInProcess(name)) {
-            return llvm::JITSymbol(SymAddr, llvm::JITSymbolFlags::Exported);
-          }
-          return nullptr;
-        },
-        [](llvm::Error Err) {
-          llvm::cantFail(std::move(Err), "lookupFlags failed");
-        });
-  }
-#else
-  std::shared_ptr<llvm::JITSymbolResolver> createResolver() {
-    // Build our symbol resolver:
-    // Lambda 1: Look back into the JIT itself to find symbols that are part of
-    //           the same "logical dylib".
-    // Lambda 2: Search for external symbols in the host process.
-    return llvm::orc::createLambdaResolver(
-        [this](const std::string &name) {
-          if (auto Sym = compileLayer.findSymbol(name, false)) {
-            return Sym;
-          }
-          return llvm::JITSymbol(nullptr);
-        },
-        [this](const std::string &name) {
-          auto it = symMap.find(name);
-          if (symMap.end() != it) {
-            return llvm::JITSymbol(
-                reinterpret_cast<llvm::JITTargetAddress>(it->second),
-                llvm::JITSymbolFlags::Exported);
-          }
-          if (auto SymAddr = getSymbolInProcess(name)) {
-            return llvm::JITSymbol(SymAddr, llvm::JITSymbolFlags::Exported);
-          }
-          return llvm::JITSymbol(nullptr);
-        });
-  }
-#endif
-};
-
-MyJIT &getJit() {
-  static MyJIT jit;
-  return jit;
-}
-
-void setRtCompileVars(const Context &context, llvm::Module &module,
-                      llvm::ArrayRef<RtCompileVarList> vals) {
-  for (auto &&val : vals) {
-    setRtCompileVar(context, module, val.name, val.init);
-  }
-}
-
 template <typename T>
 auto toArray(T *ptr, size_t size)
     -> llvm::ArrayRef<typename std::remove_cv<T>::type> {
   return llvm::ArrayRef<typename std::remove_cv<T>::type>(ptr, size);
 }
+
+template <typename F>
+void enumModules(const RtCompileModuleList *modlist_head,
+                 const Context &context, F &&fun) {
+  auto current = modlist_head;
+  while (current != nullptr) {
+    interruptPoint(context, "check version");
+    if (current->version != ApiVersion) {
+      fatal(context, "Module was built with different jit api version");
+    }
+    fun(*current);
+    current = current->next;
+  }
+}
+
+std::string decorate(const std::string &name,
+                     const llvm::DataLayout &datalayout) {
+  assert(!name.empty());
+  llvm::SmallVector<char, 64> ret;
+  llvm::Mangler::getNameWithPrefix(ret, name, datalayout);
+  assert(!ret.empty());
+  return std::string(ret.data(), ret.size());
+}
+
+struct JitModuleInfo final {
+private:
+  struct Func final {
+    llvm::StringRef name;
+    void **thunkVar;
+    void *originalFunc;
+  };
+  std::vector<Func> funcs;
+  mutable std::unordered_map<const void *, const Func *> funcsMap;
+
+  struct BindHandle final {
+    std::string name;
+    void *handle = nullptr;
+  };
+  std::vector<BindHandle> bindHandles;
+
+public:
+  JitModuleInfo(const Context &context,
+                const RtCompileModuleList *modlist_head) {
+    enumModules(modlist_head, context, [&](const RtCompileModuleList &current) {
+      for (auto &&fun : toArray(current.funcList, static_cast<std::size_t>(
+                                                      current.funcListSize))) {
+        funcs.push_back({fun.name, fun.func, fun.originalFunc});
+      }
+    });
+  }
+
+  const std::vector<Func> &functions() const { return funcs; }
+
+  const std::unordered_map<const void *, const Func *> &functionsMap() const {
+    if (funcsMap.empty() && !funcs.empty()) {
+      for (auto &&fun : funcs) {
+        funcsMap.insert({fun.originalFunc, &fun});
+      }
+    }
+    return funcsMap;
+  }
+
+  const Func *getFunc(const void *ptr) const {
+    assert(ptr != nullptr);
+    auto &funcMap = functionsMap();
+    auto it = funcMap.find(ptr);
+    if (funcMap.end() != it) {
+      return it->second;
+    }
+    return nullptr;
+  }
+
+  const std::vector<BindHandle> &getBindHandles() const { return bindHandles; }
+
+  void addBindHandle(llvm::StringRef name, void *handle) {
+    assert(!name.empty());
+    assert(handle != nullptr);
+    BindHandle h;
+    h.name = name.str();
+    h.handle = handle;
+    bindHandles.emplace_back(std::move(h));
+  }
+};
 
 void *resolveSymbol(llvm::JITSymbol &symbol) {
   auto addr = symbol.getAddress();
@@ -332,6 +168,116 @@ void *resolveSymbol(llvm::JITSymbol &symbol) {
     return nullptr;
   } else {
     return reinterpret_cast<void *>(addr.get());
+  }
+}
+
+void generateBind(const Context &context, DynamicCompilerContext &jitContext,
+                  JitModuleInfo &moduleInfo, llvm::Module &module) {
+  auto getIrFunc = [&](const void *ptr) -> llvm::Function * {
+    assert(ptr != nullptr);
+    auto funcDesc = moduleInfo.getFunc(ptr);
+    if (funcDesc == nullptr) {
+      return nullptr;
+    }
+    return module.getFunction(funcDesc->name);
+  };
+
+  std::unordered_map<const void *, llvm::Function *> bindFuncs;
+  bindFuncs.reserve(jitContext.getBindInstances().size() * 2);
+
+  auto genBind = [&](void *bindPtr, void *originalFunc, void *exampleFunc,
+                     const llvm::ArrayRef<ParamSlice> &params) {
+    assert(bindPtr != nullptr);
+    assert(bindFuncs.end() == bindFuncs.find(bindPtr));
+    auto funcToInline = getIrFunc(originalFunc);
+    if (funcToInline != nullptr) {
+      auto exampleIrFunc = getIrFunc(exampleFunc);
+      assert(exampleIrFunc != nullptr);
+      auto errhandler = [&](const std::string &str) { fatal(context, str); };
+      auto overrideHandler = [&](llvm::Type &type, const void *data,
+                                 size_t size) -> llvm::Constant * {
+        if (type.isPointerTy()) {
+          auto getBindFunc = [&]() {
+            auto handle = *static_cast<void *const *>(data);
+            return handle != nullptr && jitContext.hasBindFunction(handle)
+                       ? handle
+                       : nullptr;
+          };
+
+          auto ptype = llvm::cast<llvm::PointerType>(&type);
+          auto elemType = ptype->getElementType();
+          if (elemType->isFunctionTy()) {
+            (void)size;
+            assert(size == sizeof(void *));
+            auto val = *reinterpret_cast<void *const *>(data);
+            if (val != nullptr) {
+              auto ret = getIrFunc(val);
+              if (ret != nullptr && ret->getType() != &type) {
+                return llvm::ConstantExpr::getBitCast(ret, &type);
+              }
+              return ret;
+            }
+          } else if (auto handle = getBindFunc()) {
+            auto it = bindFuncs.find(handle);
+            assert(bindFuncs.end() != it);
+            auto bindIrFunc = it->second;
+            auto funcPtrType = bindIrFunc->getType();
+            auto globalVar1 = new llvm::GlobalVariable(
+                module, funcPtrType, true, llvm::GlobalValue::PrivateLinkage,
+                bindIrFunc, ".jit_bind_handle");
+            return llvm::ConstantExpr::getBitCast(globalVar1, &type);
+          }
+        }
+        return nullptr;
+      };
+      auto func =
+          bindParamsToFunc(module, *funcToInline, *exampleIrFunc, params,
+                           errhandler, BindOverride(overrideHandler));
+      moduleInfo.addBindHandle(func->getName(), bindPtr);
+      bindFuncs.insert({bindPtr, func});
+    } else {
+      fatal(context, "Bind: function body not available");
+    }
+  };
+  for (auto &&bind : jitContext.getBindInstances()) {
+    auto bindPtr = bind.first;
+    auto &bindDesc = bind.second;
+    assert(bindDesc.originalFunc != nullptr);
+    genBind(bindPtr, bindDesc.originalFunc, bindDesc.exampleFunc,
+            bindDesc.params);
+  }
+}
+
+void applyBind(const Context &context, DynamicCompilerContext &jitContext,
+               const JitModuleInfo &moduleInfo) {
+  auto &layout = jitContext.getDataLayout();
+  for (auto &elem : moduleInfo.getBindHandles()) {
+    auto decorated = decorate(elem.name, layout);
+    auto symbol = jitContext.findSymbol(decorated);
+    auto addr = resolveSymbol(symbol);
+    if (nullptr == addr) {
+      std::string desc = std::string("Symbol not found in jitted code: \"") +
+                         elem.name + "\" (\"" + decorated + "\")";
+      fatal(context, desc);
+    } else {
+      auto handle = static_cast<void **>(elem.handle);
+      *handle = addr;
+    }
+  }
+}
+
+DynamicCompilerContext &getJit(DynamicCompilerContext *context) {
+  if (context != nullptr) {
+    return *context;
+  }
+  static DynamicCompilerContext jit(/*mainContext*/ true);
+  return jit;
+}
+
+void setRtCompileVars(const Context &context, llvm::Module &module,
+                      llvm::ArrayRef<RtCompileVarList> vals) {
+  for (auto &&val : vals) {
+    setRtCompileVar(context, module, val.name, val.init);
   }
 }
 
@@ -347,7 +293,7 @@ void dumpModule(const Context &context, const llvm::Module &module,
   }
 }
 
-void setFunctionsTarget(llvm::Module &module, llvm::TargetMachine &TM) {
+void setFunctionsTarget(llvm::Module &module, const llvm::TargetMachine &TM) {
   // Set function target cpu to host if it wasn't set explicitly
   for (auto &&func : module.functions()) {
     if (!func.hasFnAttribute("target-cpu")) {
@@ -364,9 +310,9 @@ void setFunctionsTarget(llvm::Module &module, llvm::TargetMachine &TM) {
 }
 
 struct JitFinaliser final {
-  MyJIT &jit;
+  DynamicCompilerContext &jit;
   bool finalized = false;
-  explicit JitFinaliser(MyJIT &j) : jit(j) {}
+  explicit JitFinaliser(DynamicCompilerContext &j) : jit(j) {}
   ~JitFinaliser() {
     if (!finalized) {
       jit.reset();
@@ -376,20 +322,6 @@ struct JitFinaliser final {
   void finalze() { finalized = true; }
 };
 
-template <typename F>
-void enumModules(const RtCompileModuleList *modlist_head,
-                 const Context &context, F &&fun) {
-  auto current = modlist_head;
-  while (current != nullptr) {
-    interruptPoint(context, "check version");
-    if (current->version != ApiVersion) {
-      fatal(context, "Module was built with different jit api version");
-    }
-    fun(*current);
-    current = current->next;
-  }
-}
-
 void rtCompileProcessImplSoInternal(const RtCompileModuleList *modlist_head,
                                     const Context &context) {
   if (nullptr == modlist_head) {
@@ -397,12 +329,12 @@ void rtCompileProcessImplSoInternal(const RtCompileModuleList *modlist_head,
     return;
   }
   interruptPoint(context, "Init");
-  MyJIT &myJit = getJit();
+  DynamicCompilerContext &myJit = getJit(context.compilerContext);
 
-  std::vector<std::pair<std::string, void **>> functions;
+  JitModuleInfo moduleInfo(context, modlist_head);
   std::unique_ptr<llvm::Module> finalModule;
-  auto &symMap = myJit.getSymMap();
-  symMap.clear();
+  myJit.clearSymMap();
+  auto &layout = myJit.getDataLayout();
   OptimizerSettings settings;
   settings.optLevel = context.optLevel;
   settings.sizeLevel = context.sizeLevel;
@@ -415,7 +347,7 @@ void rtCompileProcessImplSoInternal(const RtCompileModuleList *modlist_head,
     interruptPoint(context, "parse IR");
     auto mod = llvm::parseBitcodeFile(*buff, myJit.getContext());
     if (!mod) {
-      fatal(context, "Unable to parse IR");
+      fatal(context, "Unable to parse IR: " + llvm::toString(mod.takeError()));
     } else {
       llvm::Module &module = **mod;
       const auto name = module.getName();
@@ -440,19 +372,17 @@ void rtCompileProcessImplSoInternal(const RtCompileModuleList *modlist_head,
         }
       }
 
-      for (auto &&fun : toArray(current.funcList, static_cast<std::size_t>(
-                                                      current.funcListSize))) {
-        functions.push_back(std::make_pair(fun.name, fun.func));
-      }
-
       for (auto &&sym : toArray(current.symList, static_cast<std::size_t>(
                                                      current.symListSize))) {
-        symMap.insert(std::make_pair(decorate(sym.name), sym.sym));
+        myJit.addSymbol(decorate(sym.name, layout), sym.sym);
       }
     }
   });
 
   assert(nullptr != finalModule);
+
+  interruptPoint(context, "Generate bind functions");
+  generateBind(context, myJit, moduleInfo, *finalModule);
   dumpModule(context, *finalModule, DumpStage::MergedModule);
   interruptPoint(context, "Optimize final module");
   optimizeModule(context, myJit.getTargetMachine(), settings, *finalModule);
@@ -470,53 +400,89 @@ void rtCompileProcessImplSoInternal(const RtCompileModuleList *modlist_head,
     };
 
     CallbackOstream os(callback);
-    if (myJit.addModule(std::move(finalModule), &os)) {
-      fatal(context, "Can't codegen module");
+    if (auto err = myJit.addModule(std::move(finalModule), &os)) {
+      fatal(context, "Can't codegen module: " + llvm::toString(std::move(err)));
     }
   } else {
-    if (myJit.addModule(std::move(finalModule), nullptr)) {
-      fatal(context, "Can't codegen module");
+    if (auto err = myJit.addModule(std::move(finalModule), nullptr)) {
+      fatal(context, "Can't codegen module: " + llvm::toString(std::move(err)));
     }
   }
 
   JitFinaliser jitFinalizer(myJit);
-  interruptPoint(context, "Resolve functions");
-  for (auto &&fun : functions) {
-    auto decorated = decorate(fun.first);
-    auto symbol = myJit.findSymbol(decorated);
-    auto addr = resolveSymbol(symbol);
-    if (nullptr == addr) {
-      std::string desc = std::string("Symbol not found in jitted code: \"") +
-                         fun.first + "\" (\"" + decorated + "\")";
-      fatal(context, desc);
-    } else {
-      *fun.second = addr;
-    }
+  if (myJit.isMainContext()) {
+    interruptPoint(context, "Resolve functions");
+    for (auto &&fun : moduleInfo.functions()) {
+      if (fun.thunkVar == nullptr) {
+        continue;
+      }
+      auto decorated = decorate(fun.name, layout);
+      auto symbol = myJit.findSymbol(decorated);
+      auto addr = resolveSymbol(symbol);
+      if (nullptr == addr) {
+        std::string desc = std::string("Symbol not found in jitted code: \"") +
+                           fun.name.data() + "\" (\"" + decorated + "\")";
+        fatal(context, desc);
+      } else {
+        *fun.thunkVar = addr;
+      }
 
-    if (nullptr != context.interruptPointHandler) {
-      std::stringstream ss;
-      ss << fun.first << " to " << addr;
-      auto str = ss.str();
-      interruptPoint(context, "Resolved", str.c_str());
+      if (nullptr != context.interruptPointHandler) {
+        std::stringstream ss;
+        ss << fun.name.data() << " to " << addr;
+        auto str = ss.str();
+        interruptPoint(context, "Resolved", str.c_str());
+      }
     }
   }
+  interruptPoint(context, "Update bind handles");
+  applyBind(context, myJit, moduleInfo);
   jitFinalizer.finalze();
 }
 
 } // anon namespace
 
 extern "C" {
-
-#ifdef _WIN32
-__declspec(dllexport)
-#else
-__attribute__ ((visibility ("default")))
-#endif
-void JIT_API_ENTRYPOINT(const void *modlist_head, const Context *context,
-                        size_t contextSize) {
+EXTERNAL void JIT_API_ENTRYPOINT(const void *modlist_head,
+                                 const Context *context, size_t contextSize) {
   assert(nullptr != context);
   assert(sizeof(*context) == contextSize);
   rtCompileProcessImplSoInternal(
       static_cast<const RtCompileModuleList *>(modlist_head), *context);
+}
+
+EXTERNAL void JIT_REG_BIND_PAYLOAD(class DynamicCompilerContext *context,
+                                   void *handle, void *originalFunc,
+                                   void *exampleFunc, const ParamSlice *params,
+                                   size_t paramsSize) {
+  assert(handle != nullptr);
+  assert(originalFunc != nullptr);
+  assert(exampleFunc != nullptr);
+  DynamicCompilerContext &myJit = getJit(context);
+  myJit.registerBind(handle, originalFunc, exampleFunc,
+                     toArray(params, paramsSize));
+}
+
+EXTERNAL void JIT_UNREG_BIND_PAYLOAD(class DynamicCompilerContext *context,
+                                     void *handle) {
+  assert(handle != nullptr);
+  DynamicCompilerContext &myJit = getJit(context);
+  myJit.unregisterBind(handle);
+}
+
+EXTERNAL DynamicCompilerContext *JIT_CREATE_COMPILER_CONTEXT() {
+  return new DynamicCompilerContext(false);
+}
+
+EXTERNAL void JIT_DESTROY_COMPILER_CONTEXT(DynamicCompilerContext *context) {
+  assert(context != nullptr);
+  delete context;
+}
+
+EXTERNAL bool JIT_SET_OPTS(const Slice<Slice<const char>> *args,
+                           void (*errs)(void *, const char *, size_t),
+                           void *errsContext) {
+  assert(args != nullptr);
+  return parseOptions(*args, errs, errsContext);
 }
 }

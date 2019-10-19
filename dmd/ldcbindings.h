@@ -7,11 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_DDMD_LDCBINDINGS_H
-#define LDC_DDMD_LDCBINDINGS_H
+#pragma once
 
 #include "expression.h"
 #include <cstdint>
+
+class InlineAsmStatement;
 
 using uint = uint32_t;
 
@@ -39,6 +40,7 @@ NegExp *createNegExp(const Loc &, Expression *);
 AddrExp *createAddrExp(const Loc &, Expression *);
 DsymbolExp *createDsymbolExp(const Loc &, Dsymbol *, bool = false);
 Expression *createExpression(const Loc &loc, TOK op, int size);
+InlineAsmStatement *createInlineAsmStatement(const Loc &loc, Token *tokens);
 TypeDelegate *createTypeDelegate(Type *t);
 TypeIdentifier *createTypeIdentifier(const Loc &loc, Identifier *ident);
 
@@ -72,5 +74,3 @@ NEWD_TEMPLATE(MulExp)
 NEWD_TEMPLATE(DivExp)
 NEWD_TEMPLATE(AddExp)
 NEWD_TEMPLATE(MinExp)
-
-#endif // LDC_DDMD_LDCBINDINGS_H

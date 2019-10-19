@@ -25,7 +25,7 @@ struct MIPS64TargetABI : TargetABI {
 
   explicit MIPS64TargetABI(const bool Is64Bit) : Is64Bit(Is64Bit) {}
 
-  bool returnInArg(TypeFunction *tf) override {
+  bool returnInArg(TypeFunction *tf, bool) override {
     if (tf->isref) {
       return false;
     }
@@ -42,12 +42,12 @@ struct MIPS64TargetABI : TargetABI {
     return (rt->ty == Tstruct || rt->ty == Tsarray);
   }
 
-  bool passByVal(Type *t) override {
+  bool passByVal(TypeFunction *, Type *t) override {
     TY ty = t->toBasetype()->ty;
     return ty == Tstruct || ty == Tsarray;
   }
 
-  void rewriteFunctionType(TypeFunction *tf, IrFuncTy &fty) override {
+  void rewriteFunctionType(IrFuncTy &fty) override {
     if (!fty.ret->byref) {
       rewriteArgument(fty, *fty.ret);
     }
@@ -56,11 +56,6 @@ struct MIPS64TargetABI : TargetABI {
       if (!arg->byref) {
         rewriteArgument(fty, *arg);
       }
-    }
-
-    // extern(D): reverse parameter order for non variadics, for DMD-compliance
-    if (tf->linkage == LINKd && tf->varargs != 1 && fty.args.size() > 1) {
-      fty.reverseParams = true;
     }
   }
 

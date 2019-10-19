@@ -7,21 +7,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/IR/DerivedTypes.h"
+#include "ir/irtypeclass.h"
 
-#include "aggregate.h"
-#include "declaration.h"
-#include "dsymbol.h"
-#include "mtype.h"
-#include "target.h"
-#include "template.h"
-
+#include "dmd/aggregate.h"
+#include "dmd/declaration.h"
+#include "dmd/dsymbol.h"
+#include "dmd/mtype.h"
+#include "dmd/target.h"
+#include "dmd/template.h"
+#include "gen/functions.h"
 #include "gen/irstate.h"
+#include "gen/llvmhelpers.h"
 #include "gen/logger.h"
 #include "gen/tollvm.h"
-#include "gen/llvmhelpers.h"
-#include "gen/functions.h"
-#include "ir/irtypeclass.h"
+#include "llvm/IR/DerivedTypes.h"
 
 IrTypeClass::IrTypeClass(ClassDeclaration *cd)
     : IrTypeAggr(cd), cd(cd), tc(static_cast<TypeClass *>(cd->type)) {
@@ -41,7 +40,7 @@ void IrTypeClass::addClassData(AggrTypeBuilder &builder,
     // extract that from the "well-known" object.TypeInfo_Class definition.
     // For C++ interfaces, this vtbl entry has to be omitted
 
-    builder.alignCurrentOffset(Target::ptrsize);
+    builder.alignCurrentOffset(target.ptrsize);
 
     for (auto b : *currCd->vtblInterfaces) {
       IF_LOG Logger::println("Adding interface vtbl for %s",
@@ -50,7 +49,7 @@ void IrTypeClass::addClassData(AggrTypeBuilder &builder,
       // add to the interface map
       addInterfaceToMap(b->sym, builder.currentFieldIndex());
       auto vtblTy = LLArrayType::get(getVoidPtrType(), b->sym->vtbl.dim);
-      builder.addType(llvm::PointerType::get(vtblTy, 0), Target::ptrsize);
+      builder.addType(llvm::PointerType::get(vtblTy, 0), target.ptrsize);
 
       ++num_interface_vtbls;
     }
@@ -78,7 +77,7 @@ IrTypeClass *IrTypeClass::get(ClassDeclaration *cd) {
   AggrTypeBuilder builder(t->packed);
 
   // add vtbl
-  builder.addType(llvm::PointerType::get(t->vtbl_type, 0), Target::ptrsize);
+  builder.addType(llvm::PointerType::get(t->vtbl_type, 0), target.ptrsize);
 
   if (cd->isInterfaceDeclaration()) {
     // interfaces are just a vtable
@@ -89,7 +88,7 @@ IrTypeClass *IrTypeClass::get(ClassDeclaration *cd) {
       // add monitor
       builder.addType(
           llvm::PointerType::get(llvm::Type::getInt8Ty(gIR->context()), 0),
-          Target::ptrsize);
+          target.ptrsize);
     }
 
     // add data members recursively

@@ -2,7 +2,7 @@
  * Compiler implementation of the
  * $(LINK2 http://www.dlang.org, D programming language).
  *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/dclass.d, _dclass.d)
@@ -123,7 +123,7 @@ struct BaseClass
         return result;
     }
 
-    extern (C++) void copyBaseInterfaces(BaseClasses* vtblInterfaces)
+    extern (D) void copyBaseInterfaces(BaseClasses* vtblInterfaces)
     {
         //printf("+copyBaseInterfaces(), %s\n", sym.toChars());
         //    if (baseInterfaces.length)
@@ -147,48 +147,18 @@ struct BaseClass
     }
 }
 
-struct ClassFlags
+enum ClassFlags : int
 {
-    alias Type = uint;
-
-    enum Enum : int
-    {
-        isCOMclass = 0x1,
-        noPointers = 0x2,
-        hasOffTi = 0x4,
-        hasCtor = 0x8,
-        hasGetMembers = 0x10,
-        hasTypeInfo = 0x20,
-        isAbstract = 0x40,
-        isCPPclass = 0x80,
-        hasDtor = 0x100,
-    }
-
-    alias isCOMclass = Enum.isCOMclass;
-    alias noPointers = Enum.noPointers;
-    alias hasOffTi = Enum.hasOffTi;
-    alias hasCtor = Enum.hasCtor;
-    alias hasGetMembers = Enum.hasGetMembers;
-    alias hasTypeInfo = Enum.hasTypeInfo;
-    alias isAbstract = Enum.isAbstract;
-    alias isCPPclass = Enum.isCPPclass;
-    alias hasDtor = Enum.hasDtor;
-}
-
-/**
- * The ClassKind enum is used in ClassDeclaration AST nodes
- * to specify the linkage type of the class or if it is an
- * anonymous class. If the class is anonymous it is also
- * considered to be a D class.
- */
-enum ClassKind : int
-{
-    /// the class is a d(efault) class
-    d,
-    /// the class is a C++ interface
-    cpp,
-    /// the class is an Objective-C class/interface
-    objc,
+    none          = 0x0,
+    isCOMclass    = 0x1,
+    noPointers    = 0x2,
+    hasOffTi      = 0x4,
+    hasCtor       = 0x8,
+    hasGetMembers = 0x10,
+    hasTypeInfo   = 0x20,
+    isAbstract    = 0x40,
+    isCPPclass    = 0x80,
+    hasDtor       = 0x100,
 }
 
 /***********************************************************
@@ -230,8 +200,8 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
     /// true if this is a scope class
     bool stack;
 
-    /// specifies whether this is a D, C++, Objective-C or anonymous class/interface
-    ClassKind classKind;
+    /// if this is a C++ class, this is the slot reserved for the virtual destructor
+    int cppDtorVtblIndex = -1;
 
     /// to prevent recursive attempts
     private bool inuse;
@@ -253,18 +223,18 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
 
     Symbol* cpp_type_info_ptr_sym;      // cached instance of class Id.cpp_type_info_ptr
 
-    final extern (D) this(Loc loc, Identifier id, BaseClasses* baseclasses, Dsymbols* members, bool inObject)
+    final extern (D) this(const ref Loc loc, Identifier id, BaseClasses* baseclasses, Dsymbols* members, bool inObject)
     {
+        objc = ObjcClassDeclaration(this);
+
         if (!id)
         {
-            id = Identifier.generateId("__anonclass");
             isActuallyAnonymous = true;
         }
-        assert(id);
 
-        super(loc, id);
+        super(loc, id ? id : Identifier.generateId("__anonclass"));
 
-        static __gshared const(char)* msg = "only object.d can define this reserved class name";
+        __gshared const(char)* msg = "only object.d can define this reserved class name";
 
         if (baseclasses)
         {
@@ -276,7 +246,7 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
 
         this.members = members;
 
-        //printf("ClassDeclaration(%s), dim = %d\n", id.toChars(), this.baseclasses.dim);
+        //printf("ClassDeclaration(%s), dim = %d\n", ident.toChars(), this.baseclasses.dim);
 
         // For forward references
         type = new TypeClass(this);
@@ -462,7 +432,7 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
             /* This enables us to use COM objects under Linux and
              * work with things like XPCOM
              */
-            sc2.linkage = Target.systemLinkage();
+            sc2.linkage = target.systemLinkage();
         }
         return sc2;
     }
@@ -625,16 +595,16 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
         {
             if (interfaces.length == 0)
             {
-                alignsize = Target.ptrsize;
-                structsize = Target.ptrsize;      // allow room for __vptr
+                alignsize = target.ptrsize;
+                structsize = target.ptrsize;      // allow room for __vptr
             }
         }
         else
         {
-            alignsize = Target.ptrsize;
-            structsize = Target.ptrsize;      // allow room for __vptr
-            if (classKind != ClassKind.cpp)
-                structsize += Target.ptrsize; // allow room for __monitor
+            alignsize = target.ptrsize;
+            structsize = target.ptrsize;      // allow room for __vptr
+            if (hasMonitor())
+                structsize += target.ptrsize; // allow room for __monitor
         }
 
         //printf("finalizeSize() %s, sizeok = %d\n", toChars(), sizeok);
@@ -662,7 +632,7 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
                 assert(b.sym.sizeok == Sizeok.done);
 
                 if (!b.sym.alignsize)
-                    b.sym.alignsize = Target.ptrsize;
+                    b.sym.alignsize = target.ptrsize;
                 alignmember(b.sym.alignsize, b.sym.alignsize, &offset);
                 assert(bi < vtblInterfaces.dim);
 
@@ -711,6 +681,14 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
 
         // Calculate fields[i].overlapped
         checkOverlappedFields();
+    }
+
+    /**************
+     * Returns: true if there's a __monitor field
+     */
+    final bool hasMonitor()
+    {
+        return classKind == ClassKind.d;
     }
 
     override bool isAnonymous()
@@ -768,6 +746,13 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
         FuncDeclaration fdmatch = null;
         FuncDeclaration fdambig = null;
 
+        void updateBestMatch(FuncDeclaration fd)
+        {
+            fdmatch = fd;
+            fdambig = null;
+            //printf("Lfd fdmatch = %s %s [%s]\n", fdmatch.toChars(), fdmatch.type.toChars(), fdmatch.loc.toChars());
+        }
+
         void searchVtbl(ref Dsymbols vtbl)
         {
             foreach (s; vtbl)
@@ -782,49 +767,51 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
                 {
                     //printf("fd.parent.isClassDeclaration() = %p\n", fd.parent.isClassDeclaration());
                     if (!fdmatch)
-                        goto Lfd;
+                    {
+                        updateBestMatch(fd);
+                        continue;
+                    }
                     if (fd == fdmatch)
-                        goto Lfdmatch;
+                        continue;
 
                     {
                     // Function type matching: exact > covariant
                     MATCH m1 = tf.equals(fd.type) ? MATCH.exact : MATCH.nomatch;
                     MATCH m2 = tf.equals(fdmatch.type) ? MATCH.exact : MATCH.nomatch;
                     if (m1 > m2)
-                        goto Lfd;
+                    {
+                        updateBestMatch(fd);
+                        continue;
+                    }
                     else if (m1 < m2)
-                        goto Lfdmatch;
+                        continue;
                     }
                     {
                     MATCH m1 = (tf.mod == fd.type.mod) ? MATCH.exact : MATCH.nomatch;
                     MATCH m2 = (tf.mod == fdmatch.type.mod) ? MATCH.exact : MATCH.nomatch;
                     if (m1 > m2)
-                        goto Lfd;
+                    {
+                        updateBestMatch(fd);
+                        continue;
+                    }
                     else if (m1 < m2)
-                        goto Lfdmatch;
+                        continue;
                     }
                     {
                     // The way of definition: non-mixin > mixin
                     MATCH m1 = fd.parent.isClassDeclaration() ? MATCH.exact : MATCH.nomatch;
                     MATCH m2 = fdmatch.parent.isClassDeclaration() ? MATCH.exact : MATCH.nomatch;
                     if (m1 > m2)
-                        goto Lfd;
+                    {
+                        updateBestMatch(fd);
+                        continue;
+                    }
                     else if (m1 < m2)
-                        goto Lfdmatch;
+                        continue;
                     }
 
                     fdambig = fd;
                     //printf("Lambig fdambig = %s %s [%s]\n", fdambig.toChars(), fdambig.type.toChars(), fdambig.loc.toChars());
-                    continue;
-
-                Lfd:
-                    fdmatch = fd;
-                    fdambig = null;
-                    //printf("Lfd fdmatch = %s %s [%s]\n", fdmatch.toChars(), fdmatch.type.toChars(), fdmatch.loc.toChars());
-                    continue;
-
-                Lfdmatch:
-                    continue;
                 }
                 //else printf("\t\t%d\n", fd.type.covariant(tf));
             }
@@ -985,11 +972,32 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
      */
     override final void addLocalClass(ClassDeclarations* aclasses)
     {
-        aclasses.push(this);
+        if (classKind != ClassKind.objc)
+            aclasses.push(this);
+    }
+
+    override final void addObjcSymbols(ClassDeclarations* classes, ClassDeclarations* categories)
+    {
+        .objc.addSymbols(this, classes, categories);
     }
 
     // Back end
-    Symbol* vtblsym;
+    Dsymbol vtblsym;
+
+    final Dsymbol vtblSymbol()
+    {
+        if (!vtblsym)
+        {
+            auto vtype = Type.tvoidptr.immutableOf().sarrayOf(vtbl.dim);
+            auto var = new VarDeclaration(loc, vtype, Identifier.idPool("__vtbl"), null, STC.immutable_ | STC.static_);
+            var.addMember(null, this);
+            var.isdataseg = 1;
+            var.linkage = LINK.d;
+            var.semanticRun = PASS.semanticdone; // no more semantic wanted
+            vtblsym = var;
+        }
+        return vtblsym;
+    }
 
     override final inout(ClassDeclaration) isClassDeclaration() inout
     {
@@ -1006,7 +1014,7 @@ extern (C++) class ClassDeclaration : AggregateDeclaration
  */
 extern (C++) final class InterfaceDeclaration : ClassDeclaration
 {
-    extern (D) this(Loc loc, Identifier id, BaseClasses* baseclasses)
+    extern (D) this(const ref Loc loc, Identifier id, BaseClasses* baseclasses)
     {
         super(loc, id, baseclasses, null, false);
         if (id == Id.IUnknown) // IUnknown is the root of all COM interfaces

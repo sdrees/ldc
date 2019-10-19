@@ -8,17 +8,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "gen/abi.h"
-#include "mars.h"
-#include "id.h"
-#include "gen/abi-generic.h"
+
+#include "dmd/expression.h"
+#include "dmd/id.h"
+#include "dmd/identifier.h"
 #include "gen/abi-aarch64.h"
 #include "gen/abi-arm.h"
+#include "gen/abi-generic.h"
 #include "gen/abi-mips64.h"
 #include "gen/abi-ppc.h"
 #include "gen/abi-ppc64le.h"
 #include "gen/abi-win64.h"
-#include "gen/abi-x86-64.h"
 #include "gen/abi-x86.h"
+#include "gen/abi-x86-64.h"
 #include "gen/dvalue.h"
 #include "gen/irstate.h"
 #include "gen/llvm.h"
@@ -33,6 +35,13 @@
 
 llvm::Value *ABIRewrite::getRVal(Type *dty, LLValue *v) {
   return DtoLoad(DtoBitCast(getLVal(dty, v), DtoType(dty)->getPointerTo()));
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+void ABIRewrite::applyTo(IrFuncTyArg &arg, LLType *finalLType) {
+  arg.rewrite = this;
+  arg.ltype = finalLType ? finalLType : this->type(arg.type);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -136,7 +145,7 @@ bool isNestedHFA(const TypeStruct *t, d_uns64 &floatSize, int &num,
       else if (sz != floatSize) // different float size, reject
         return false;
 
-      //if (n > 4)
+      // if (n > 4)
       //  return false; // too many floats for HFA, reject
     } else {
       return false; // reject all other types
@@ -151,7 +160,8 @@ bool isNestedHFA(const TypeStruct *t, d_uns64 &floatSize, int &num,
 }
 }
 
-bool TargetABI::isHFA(TypeStruct *t, llvm::Type **rewriteType, const int maxFloats) {
+bool TargetABI::isHFA(TypeStruct *t, llvm::Type **rewriteType,
+                      const int maxFloats) {
   d_uns64 floatSize = 0;
   int num = 0;
 
@@ -160,17 +170,17 @@ bool TargetABI::isHFA(TypeStruct *t, llvm::Type **rewriteType, const int maxFloa
       if (rewriteType) {
         llvm::Type *floatType = nullptr;
         switch (floatSize) {
-          case 4:
-            floatType = llvm::Type::getFloatTy(gIR->context());
-            break;
-          case 8:
-            floatType = llvm::Type::getDoubleTy(gIR->context());
-            break;
-          case 16:
-            floatType = llvm::Type::getFP128Ty(gIR->context());
-            break;
-          default:
-            llvm_unreachable("Unexpected size for float type");
+        case 4:
+          floatType = llvm::Type::getFloatTy(gIR->context());
+          break;
+        case 8:
+          floatType = llvm::Type::getDoubleTy(gIR->context());
+          break;
+        case 16:
+          floatType = llvm::Type::getFP128Ty(gIR->context());
+          break;
+        default:
+          llvm_unreachable("Unexpected size for float type");
         }
         *rewriteType = LLArrayType::get(floatType, num);
       }
@@ -189,18 +199,6 @@ bool TargetABI::isAggregate(Type *t) {
          /*ty == Tarray ||*/ ty == Tdelegate || t->iscomplex();
 }
 
-bool TargetABI::isMagicCppStruct(Type *t) {
-  t = t->toBasetype();
-  if (t->ty != Tstruct) {
-    return false;
-  }
-
-  Identifier *id = static_cast<TypeStruct *>(t)->sym->ident;
-  return (id == Id::__c_long) || (id == Id::__c_ulong) ||
-         (id == Id::__c_longlong) || (id == Id::__c_ulonglong) ||
-         (id == Id::__c_long_double);
-}
-
 namespace {
 bool hasCtor(StructDeclaration *s) {
   if (s->ctor)
@@ -217,7 +215,7 @@ bool hasCtor(StructDeclaration *s) {
 }
 
 bool TargetABI::isPOD(Type *t, bool excludeStructsWithCtor) {
-  t = t->toBasetype();
+  t = t->baseElemOf();
   if (t->ty != Tstruct)
     return true;
   StructDeclaration *sd = static_cast<TypeStruct *>(t)->sym;
@@ -227,6 +225,15 @@ bool TargetABI::isPOD(Type *t, bool excludeStructsWithCtor) {
 bool TargetABI::canRewriteAsInt(Type *t, bool include64bit) {
   auto size = t->toBasetype()->size();
   return size == 1 || size == 2 || size == 4 || (include64bit && size == 8);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+bool TargetABI::reverseExplicitParams(TypeFunction *tf) {
+  // Required by druntime for extern(D), except for `, ...`-style variadics.
+  return tf->linkage == LINKd &&
+         tf->parameterList.varargs != VARARGvariadic &&
+         tf->parameterList.length() > 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -282,7 +289,7 @@ const char *TargetABI::objcMsgSendFunc(Type *ret, IrFuncTy &fty) {
 
 // Some reasonable defaults for when we don't know what ABI to use.
 struct UnknownTargetABI : TargetABI {
-  bool returnInArg(TypeFunction *tf) override {
+  bool returnInArg(TypeFunction *tf, bool) override {
     if (tf->isref) {
       return false;
     }
@@ -292,12 +299,14 @@ struct UnknownTargetABI : TargetABI {
     // of physical registers, which leads, depending on the target, to
     // either horrendous codegen or backend crashes.
     Type *rt = tf->next->toBasetype();
-    return (rt->ty == Tstruct || rt->ty == Tsarray);
+    return passByVal(tf, rt);
   }
 
-  bool passByVal(Type *t) override { return t->toBasetype()->ty == Tstruct; }
+  bool passByVal(TypeFunction *, Type *t) override {
+    return DtoIsInMemoryOnly(t);
+  }
 
-  void rewriteFunctionType(TypeFunction *t, IrFuncTy &fty) override {
+  void rewriteFunctionType(IrFuncTy &) override {
     // why?
   }
 };
@@ -344,9 +353,11 @@ TargetABI *TargetABI::getTarget() {
 struct IntrinsicABI : TargetABI {
   RemoveStructPadding remove_padding;
 
-  bool returnInArg(TypeFunction *tf) override { return false; }
+  bool returnInArg(TypeFunction *, bool) override { return false; }
 
-  bool passByVal(Type *t) override { return false; }
+  bool passByVal(TypeFunction *, Type *t) override { return false; }
+
+  bool reverseExplicitParams(TypeFunction *) override { return false; }
 
   void rewriteArgument(IrFuncTy &fty, IrFuncTyArg &arg) override {
     Type *ty = arg.type->toBasetype();
@@ -358,12 +369,11 @@ struct IntrinsicABI : TargetABI {
     LLType *abiTy = DtoUnpaddedStructType(arg.type);
 
     if (abiTy && abiTy != arg.ltype) {
-      arg.ltype = abiTy;
-      arg.rewrite = &remove_padding;
+      remove_padding.applyTo(arg, abiTy);
     }
   }
 
-  void rewriteFunctionType(TypeFunction *tf, IrFuncTy &fty) override {
+  void rewriteFunctionType(IrFuncTy &fty) override {
     if (!fty.arg_sret) {
       Type *rt = fty.ret->type->toBasetype();
       if (rt->ty == Tstruct) {

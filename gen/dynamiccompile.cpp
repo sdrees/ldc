@@ -14,13 +14,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "dmd/errors.h"
 #include "driver/cl_options.h"
-
 #include "gen/irstate.h"
 #include "gen/llvm.h"
 #include "ir/irfunction.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#include "llvm/IR/TypeBuilder.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -92,9 +91,15 @@ using GlobalValsMap =
 void getPredefinedSymbols(IRState *irs, GlobalValsMap &symList) {
   assert(nullptr != irs);
   const llvm::Triple *triple = global.params.targetTriple;
-  if (!opts::dynamicCompileTlsWorkaround) {
-    if (triple->isWindowsMSVCEnvironment() ||
-        triple->isWindowsGNUEnvironment()) {
+  if (triple->isWindowsMSVCEnvironment() ||
+      triple->isWindowsGNUEnvironment()) {
+    // Actual signatures doesn't matter here, we only want it to show in
+    // symbols list
+    symList.insert(std::make_pair(
+      getPredefinedSymbol(irs->module, "__chkstk",
+                          llvm::Type::getInt32Ty(irs->context())),
+      GlobalValVisibility::Declaration));
+    if (!opts::dynamicCompileTlsWorkaround) {
       symList.insert(std::make_pair(
           getPredefinedSymbol(irs->module, "_tls_index",
                               llvm::Type::getInt32Ty(irs->context())),
@@ -117,7 +122,9 @@ GlobalValsMap createGlobalValsFilter(IRState *irs) {
   newFunctions.reserve(irs->dynamicCompiledFunctions.size());
 
   for (auto &&it : irs->dynamicCompiledFunctions) {
-    ret.insert({it.first, GlobalValVisibility::External});
+    auto vis = (it.second.thunkVar != nullptr ? GlobalValVisibility::External
+                                              : GlobalValVisibility::Internal);
+    ret.insert({it.first, vis});
     newFunctions.push_back(it.first);
   }
 
@@ -169,6 +176,21 @@ void iterateFuncInstructions(llvm::Function &func, F &&handler) {
   }     // for (auto &&bb : fun)
 }
 
+template <typename I> void stripDeclarations(llvm::iterator_range<I> range) {
+  for (auto it = range.begin(); it != range.end();) {
+    auto elem = &(*it);
+    ++it;
+    if (elem->isDeclaration() && elem->use_empty()) {
+      elem->eraseFromParent();
+    }
+  }
+}
+
+void stripModule(llvm::Module &module) {
+  stripDeclarations(module.functions());
+  stripDeclarations(module.globals());
+}
+
 void fixRtModule(llvm::Module &newModule,
                  const decltype(IRState::dynamicCompiledFunctions) &funcs) {
   std::unordered_map<std::string, std::string> thunkVar2func;
@@ -176,10 +198,10 @@ void fixRtModule(llvm::Module &newModule,
   std::unordered_set<std::string> externalFuncs;
   for (auto &&it : funcs) {
     assert(nullptr != it.first);
-    assert(nullptr != it.second.thunkFunc);
-    if (nullptr == it.second.thunkVar) {
-      // thunkVar is not available
-      // e.g. runtimeCompile function from other module, ignore
+    if (nullptr == it.second.thunkVar || nullptr == it.second.thunkFunc) {
+      // thunkVar or thunkFunc is not available
+      // e.g. dynamicCompile function from other module or emit-only dynamic
+      // function, ignore
       continue;
     }
     assert(!contains(thunkVar2func, it.second.thunkVar->getName()));
@@ -209,11 +231,12 @@ void fixRtModule(llvm::Module &newModule,
   // Thunks should be unused now, strip them
   for (auto &&it : funcs) {
     assert(nullptr != it.first);
-    assert(nullptr != it.second.thunkFunc);
-    auto func = newModule.getFunction(it.second.thunkFunc->getName());
-    assert(func != nullptr);
-    if (func->use_empty()) {
-      func->eraseFromParent();
+    if (nullptr != it.second.thunkFunc) {
+      auto func = newModule.getFunction(it.second.thunkFunc->getName());
+      assert(func != nullptr);
+      if (func->use_empty()) {
+        func->eraseFromParent();
+      }
     }
 
     if (nullptr != it.second.thunkVar) {
@@ -224,6 +247,8 @@ void fixRtModule(llvm::Module &newModule,
       }
     }
   }
+
+  stripModule(newModule);
 }
 
 void removeFunctionsTargets(IRState *irs, llvm::Module &module) {
@@ -354,15 +379,14 @@ getArrayAndSize(llvm::Module &module, llvm::Type *elemType,
       llvm::ConstantInt::get(module.getContext(), APInt(32, elements.size())));
 }
 
-template <typename T>
-void createStaticArray(llvm::Module &mod, llvm::GlobalVariable *var,
-                       llvm::GlobalVariable *varLen, // can be null
-                       llvm::ArrayRef<T> arr) {
+void createStaticI8Array(llvm::Module &mod, llvm::GlobalVariable *var,
+                         llvm::GlobalVariable *varLen, // can be null
+                         llvm::ArrayRef<uint8_t> arr) {
   assert(nullptr != var);
   const auto dataLen = arr.size();
   auto gvar = new llvm::GlobalVariable(
       mod,
-      llvm::ArrayType::get(llvm::TypeBuilder<T, false>::get(mod.getContext()),
+      llvm::ArrayType::get(llvm::IntegerType::get(mod.getContext(), 8),
                            dataLen),
       true, llvm::GlobalValue::InternalLinkage,
       llvm::ConstantDataArray::get(mod.getContext(), arr), ".str");
@@ -439,10 +463,12 @@ llvm::StructType *getSymListElemType(llvm::LLVMContext &context) {
 // {
 //   i8* name;
 //   i8* func;
+//   i8* originalFunc;
 // };
 
 llvm::StructType *getFuncListElemType(llvm::LLVMContext &context) {
   llvm::Type *elements[] = {
+      llvm::IntegerType::getInt8PtrTy(context),
       llvm::IntegerType::getInt8PtrTy(context),
       llvm::IntegerType::getInt8PtrTy(context),
   };
@@ -502,12 +528,12 @@ struct Types {
 };
 
 std::pair<llvm::Constant *, llvm::Constant *>
-generateFuncList(IRState *irs, const Types &types) {
+generateFuncList(IRState *irs, const Types &types,
+                 const GlobalValsMap &globalVals) {
   assert(nullptr != irs);
   std::vector<llvm::Constant *> elements;
   for (auto &&it : irs->dynamicCompiledFunctions) {
     assert(nullptr != it.first);
-    assert(nullptr != it.second.thunkFunc);
     if (nullptr == it.second.thunkVar) {
       // thunkVar is not available
       // e.g. runtimeCompile function from other module, ignore
@@ -517,11 +543,40 @@ generateFuncList(IRState *irs, const Types &types) {
     llvm::Constant *fields[] = {
         createStringInitializer(irs->module, name),
         getI8Ptr(it.second.thunkVar),
+        getI8Ptr(it.second.thunkFunc),
     };
     elements.push_back(
         llvm::ConstantStruct::get(types.funcListElemType, fields));
   }
+
+  auto &context = irs->context();
+  auto nullp = llvm::ConstantPointerNull::get(
+      llvm::PointerType::get(llvm::IntegerType::get(context, 8), 0));
+  for (auto &&it : globalVals) {
+    auto func = llvm::dyn_cast<llvm::Function>(it.first);
+    if (func != nullptr && it.second == GlobalValVisibility::Internal) {
+      auto name = it.first->getName();
+      llvm::Constant *fields[] = {
+          createStringInitializer(irs->module, name),
+          nullp,
+          getI8Ptr(func),
+      };
+      elements.push_back(
+          llvm::ConstantStruct::get(types.funcListElemType, fields));
+    }
+  }
   return getArrayAndSize(irs->module, types.funcListElemType, elements);
+}
+
+llvm::Constant *generateSymListElem(llvm::Module &module, const Types &types,
+                                    llvm::StringRef name,
+                                    llvm::GlobalValue &val) {
+
+  llvm::Constant *fields[] = {
+      createStringInitializer(module, name),
+      getI8Ptr(&val),
+  };
+  return llvm::ConstantStruct::get(types.symListElemType, fields);
 }
 
 std::pair<llvm::Constant *, llvm::Constant *>
@@ -530,20 +585,22 @@ generateSymList(IRState *irs, const Types &types,
   assert(nullptr != irs);
   std::vector<llvm::Constant *> elements;
   for (auto &&it : globalVals) {
-    if (it.second == GlobalValVisibility::Declaration) {
-      auto val = it.first;
-      if (auto fun = llvm::dyn_cast<llvm::Function>(val)) {
-        if (fun->isIntrinsic())
-          continue;
-      }
-      auto name = val->getName();
-      llvm::Constant *fields[] = {
-          createStringInitializer(irs->module, name),
-          getI8Ptr(val),
-      };
-      elements.push_back(
-          llvm::ConstantStruct::get(types.symListElemType, fields));
+    auto val = it.first;
+    assert(val != nullptr);
+    if (auto fun = llvm::dyn_cast<llvm::Function>(val)) {
+      if (fun->isIntrinsic())
+        continue;
     }
+    auto name = val->getName();
+    elements.push_back(generateSymListElem(irs->module, types, name, *val));
+  }
+  for (auto &&it : irs->dynamicCompiledFunctions) {
+    auto name = it.first->getName();
+    auto thunk = it.second.thunkFunc;
+    // We don't have thunk for dynamicCompileEmit functions, use function itself
+    auto func = (thunk != nullptr ? thunk : it.first);
+    assert(func != nullptr);
+    elements.push_back(generateSymListElem(irs->module, types, name, *func));
   }
   return getArrayAndSize(irs->module, types.symListElemType, elements);
 }
@@ -571,7 +628,7 @@ llvm::GlobalVariable *generateModuleListElem(IRState *irs, const Types &types,
                                              const GlobalValsMap &globalVals) {
   assert(nullptr != irs);
   auto elem_type = types.modListElemType;
-  auto funcListInit = generateFuncList(irs, types);
+  auto funcListInit = generateFuncList(irs, types, globalVals);
   auto symListInit = generateSymList(irs, types, globalVals);
   auto varlistInit = generateVarList(irs, types);
   llvm::Constant *fields[] = {
@@ -671,9 +728,9 @@ void setupModuleBitcodeData(const llvm::Module &srcModule, IRState *irs,
       irs->module, llvm::IntegerType::get(irs->context(), 32), true,
       llvm::GlobalValue::PrivateLinkage, nullptr, ".rtcompile_irsize");
 
-  createStaticArray(irs->module, runtimeCompiledIr, runtimeCompiledIrSize,
-                    llvm::ArrayRef<uint8_t>(
-                        reinterpret_cast<uint8_t *>(str.data()), str.size()));
+  createStaticI8Array(irs->module, runtimeCompiledIr, runtimeCompiledIrSize,
+                      llvm::ArrayRef<uint8_t>(
+                          reinterpret_cast<uint8_t *>(str.data()), str.size()));
 
   setupModuleCtor(irs, runtimeCompiledIr, runtimeCompiledIrSize, globalVals);
 }
@@ -710,6 +767,8 @@ void createThunkFunc(llvm::Module &module, const llvm::Function *src,
     args.push_back(&arg);
   }
   auto ret = builder.CreateCall(thunkPtr, args);
+  ret->setCallingConv(src->getCallingConv());
+  ret->setAttributes(src->getAttributes());
   if (dst->getReturnType()->isVoidTy()) {
     builder.CreateRetVoid();
   } else {
@@ -755,9 +814,13 @@ void declareDynamicCompiledFunction(IRState *irs, IrFunction *func) {
   if (!opts::enableDynamicCompile) {
     return;
   }
+
   auto srcFunc = func->getLLVMFunc();
-  auto thunkFunc = duplicateFunc(irs->module, srcFunc);
-  func->rtCompileFunc = thunkFunc;
+  llvm::Function *thunkFunc = nullptr;
+  if (func->dynamicCompile) {
+    thunkFunc = duplicateFunc(irs->module, srcFunc);
+    func->rtCompileFunc = thunkFunc;
+  }
   assert(!contains(irs->dynamicCompiledFunctions, srcFunc));
   irs->dynamicCompiledFunctions.insert(
       std::make_pair(srcFunc, IRState::RtCompiledFuncDesc{nullptr, thunkFunc}));
@@ -767,21 +830,24 @@ void defineDynamicCompiledFunction(IRState *irs, IrFunction *func) {
   assert(nullptr != irs);
   assert(nullptr != func);
   assert(nullptr != func->getLLVMFunc());
-  assert(nullptr != func->rtCompileFunc);
   if (!opts::enableDynamicCompile) {
     return;
   }
-  auto srcFunc = func->getLLVMFunc();
-  auto it = irs->dynamicCompiledFunctions.find(srcFunc);
-  assert(irs->dynamicCompiledFunctions.end() != it);
-  auto thunkVarType = srcFunc->getFunctionType()->getPointerTo();
-  auto thunkVar = new llvm::GlobalVariable(
-      irs->module, thunkVarType, false, llvm::GlobalValue::PrivateLinkage,
-      llvm::ConstantPointerNull::get(thunkVarType),
-      ".rtcompile_thunkvar_" + srcFunc->getName());
-  auto dstFunc = it->second.thunkFunc;
-  createThunkFunc(irs->module, srcFunc, dstFunc, thunkVar);
-  it->second.thunkVar = thunkVar;
+
+  if (func->dynamicCompile) {
+    assert(nullptr != func->rtCompileFunc);
+    auto srcFunc = func->getLLVMFunc();
+    auto it = irs->dynamicCompiledFunctions.find(srcFunc);
+    assert(irs->dynamicCompiledFunctions.end() != it);
+    auto thunkVarType = srcFunc->getFunctionType()->getPointerTo();
+    auto thunkVar = new llvm::GlobalVariable(
+        irs->module, thunkVarType, false, llvm::GlobalValue::PrivateLinkage,
+        llvm::ConstantPointerNull::get(thunkVarType),
+        ".rtcompile_thunkvar_" + srcFunc->getName());
+    auto dstFunc = it->second.thunkFunc;
+    createThunkFunc(irs->module, srcFunc, dstFunc, thunkVar);
+    it->second.thunkVar = thunkVar;
+  }
 }
 
 void addDynamicCompiledVar(IRState *irs, IrGlobal *var) {
@@ -794,7 +860,7 @@ void addDynamicCompiledVar(IRState *irs, IrGlobal *var) {
   }
 
   if (var->V->isThreadlocal()) {
-    error(Loc(), "Runtime compiled variable \"%s\" cannot be thread local",
+    error(Loc(), "Dynamic compile const variable \"%s\" cannot be thread local",
           var->V->toChars());
     fatal();
   }

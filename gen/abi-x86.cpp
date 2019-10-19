@@ -7,12 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "gen/llvm.h"
-#include "mars.h"
 #include "gen/abi-generic.h"
 #include "gen/abi.h"
 #include "gen/dvalue.h"
 #include "gen/irstate.h"
+#include "gen/llvm.h"
 #include "gen/llvmhelpers.h"
 #include "gen/logger.h"
 #include "gen/tollvm.h"
@@ -24,6 +23,7 @@ struct X86TargetABI : TargetABI {
   const bool isMSVC;
   bool returnStructsInRegs;
   IntegerRewrite integerRewrite;
+  IndirectByvalRewrite indirectByvalRewrite;
 
   X86TargetABI()
       : isOSX(global.params.targetTriple->isMacOSX()),
@@ -36,7 +36,7 @@ struct X86TargetABI : TargetABI {
 
   llvm::CallingConv::ID callingConv(LINK l, TypeFunction *tf = nullptr,
                                     FuncDeclaration *fdecl = nullptr) override {
-    if (tf && tf->varargs == 1)
+    if (tf && tf->parameterList.varargs == VARARGvariadic)
       return llvm::CallingConv::C;
 
     switch (l) {
@@ -44,7 +44,7 @@ struct X86TargetABI : TargetABI {
     case LINKobjc:
       return llvm::CallingConv::C;
     case LINKcpp:
-      return isMSVC && fdecl && fdecl->isThis()
+      return isMSVC && fdecl && fdecl->needThis()
                  ? llvm::CallingConv::X86_ThisCall
                  : llvm::CallingConv::C;
     case LINKd:
@@ -82,15 +82,16 @@ struct X86TargetABI : TargetABI {
     return name;
   }
 
-  bool returnInArg(TypeFunction *tf) override {
+  bool returnInArg(TypeFunction *tf, bool needsThis) override {
     if (tf->isref)
       return false;
 
     Type *rt = tf->next->toBasetype();
-    const bool externD = (tf->linkage == LINKd && tf->varargs != 1);
+    const bool externD =
+        (tf->linkage == LINKd && tf->parameterList.varargs != VARARGvariadic);
 
-    // non-aggregates and magic C++ structs are returned directly
-    if (!isAggregate(rt) || isMagicCppStruct(rt))
+    // non-aggregates are returned directly
+    if (!isAggregate(rt))
       return false;
 
     // complex numbers
@@ -108,8 +109,15 @@ struct X86TargetABI : TargetABI {
     if (!externD && !returnStructsInRegs)
       return true;
 
+    const bool isMSVCpp = isMSVC && tf->linkage == LINKcpp;
+
+    // for non-static member functions, MSVC++ enforces sret for all structs
+    if (isMSVCpp && needsThis && rt->ty == Tstruct) {
+      return true;
+    }
+
     // force sret for non-POD structs
-    const bool excludeStructsWithCtor = (isMSVC && tf->linkage == LINKcpp);
+    const bool excludeStructsWithCtor = isMSVCpp;
     if (!isPOD(rt, excludeStructsWithCtor))
       return true;
 
@@ -118,23 +126,26 @@ struct X86TargetABI : TargetABI {
     return !canRewriteAsInt(rt);
   }
 
-  bool passByVal(Type *t) override {
+  bool passByVal(TypeFunction *tf, Type *t) override {
+    // indirectly by-value for extern(C++) functions and non-POD args on Posix
+    if (!isMSVC && tf->linkage == LINKcpp && !isPOD(t))
+      return false;
+
     // pass all structs and static arrays with the LLVM byval attribute
     return DtoIsInMemoryOnly(t);
   }
 
-  void rewriteFunctionType(TypeFunction *tf, IrFuncTy &fty) override {
-    const bool externD = (tf->linkage == LINKd && tf->varargs != 1);
+  void rewriteFunctionType(IrFuncTy &fty) override {
+    const bool externD = (fty.type->linkage == LINKd &&
+                          fty.type->parameterList.varargs != VARARGvariadic);
 
     // return value:
     if (!fty.ret->byref) {
-      Type *rt = tf->next->toBasetype(); // for sret, rt == void
-      if (isAggregate(rt) && !isMagicCppStruct(rt) && canRewriteAsInt(rt) &&
+      Type *rt = fty.type->next->toBasetype(); // for sret, rt == void
+      if (isAggregate(rt) && canRewriteAsInt(rt) &&
           // don't rewrite cfloat for extern(D)
-          !(externD && rt->ty == Tcomplex32) &&
-          !integerRewrite.isObsoleteFor(fty.ret->ltype)) {
-        fty.ret->rewrite = &integerRewrite;
-        fty.ret->ltype = integerRewrite.type(fty.ret->type);
+          !(externD && rt->ty == Tcomplex32)) {
+        integerRewrite.applyToIfNotObsolete(*fty.ret);
       }
     }
 
@@ -144,15 +155,16 @@ struct X86TargetABI : TargetABI {
       // try an implicit argument...
       if (fty.arg_this) {
         Logger::println("Putting 'this' in register");
-        fty.arg_this->attrs.add(LLAttribute::InReg);
+        fty.arg_this->attrs.addAttribute(LLAttribute::InReg);
       } else if (fty.arg_nest) {
         Logger::println("Putting context ptr in register");
-        fty.arg_nest->attrs.add(LLAttribute::InReg);
+        fty.arg_nest->attrs.addAttribute(LLAttribute::InReg);
       } else if (IrFuncTyArg *sret = fty.arg_sret) {
         Logger::println("Putting sret ptr in register");
         // sret and inreg are incompatible, but the ABI requires the
         // sret parameter to be in EAX in this situation...
-        sret->attrs.remove(LLAttribute::StructRet).add(LLAttribute::InReg);
+        sret->attrs.removeAttribute(LLAttribute::StructRet);
+        sret->attrs.addAttribute(LLAttribute::InReg);
       }
 
       // ... otherwise try the last argument
@@ -169,25 +181,26 @@ struct X86TargetABI : TargetABI {
 
         if (last->byref && !last->isByVal()) {
           Logger::println("Putting last (byref) parameter in register");
-          last->attrs.add(LLAttribute::InReg);
+          last->attrs.addAttribute(LLAttribute::InReg);
         } else if (!lastTy->isfloating() && (sz == 1 || sz == 2 || sz == 4)) {
           // rewrite aggregates as integers to make inreg work
           if (lastTy->ty == Tstruct || lastTy->ty == Tsarray) {
-            last->rewrite = &integerRewrite;
-            last->ltype = integerRewrite.type(last->type);
+            integerRewrite.applyTo(*last);
             // undo byval semantics applied via passByVal() returning true
             last->byref = false;
             last->attrs.clear();
           }
-          last->attrs.add(LLAttribute::InReg);
+          last->attrs.addAttribute(LLAttribute::InReg);
         }
       }
 
       // all other arguments are passed on the stack, don't rewrite
-
-      // reverse parameter order
-      if (fty.args.size() > 1) {
-        fty.reverseParams = true;
+    }
+    // extern(C++) on Posix: non-POD args are passed indirectly by-value
+    else if (!isMSVC && fty.type->linkage == LINKcpp) {
+      for (auto arg : fty.args) {
+        if (!arg->byref && !isPOD(arg->type))
+          indirectByvalRewrite.applyTo(*arg);
       }
     }
 
@@ -229,7 +242,7 @@ struct X86TargetABI : TargetABI {
     if (isMSVC) {
       for (auto arg : args) {
         if (arg->isByVal())
-          arg->attrs.remove(LLAttribute::Alignment);
+          arg->attrs.removeAttribute(LLAttribute::Alignment);
       }
     }
   }

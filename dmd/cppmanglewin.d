@@ -1,7 +1,7 @@
 /**
  * Compiler implementation of the $(LINK2 http://www.dlang.org, D programming language)
  *
- * Copyright: Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright: Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * Authors: Walter Bright, http://www.digitalmars.com
  * License:   $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/cppmanglewin.d, _cppmanglewin.d)
@@ -15,7 +15,9 @@ import core.stdc.string;
 import core.stdc.stdio;
 
 import dmd.arraytypes;
+import dmd.cppmangle : isPrimaryDtor, isCppOperator, CppOperator;
 import dmd.declaration;
+import dmd.denum : isSpecialEnumIdent;
 import dmd.dsymbol;
 import dmd.dtemplate;
 import dmd.errors;
@@ -46,22 +48,42 @@ const(char)* toCppMangleMSVC(Dsymbol s)
 const(char)* cppTypeInfoMangleMSVC(Dsymbol s)
 {
     //printf("cppTypeInfoMangle(%s)\n", s.toChars());
-    version (IN_LLVM)
-    {
-        // Return the mangled name of the RTTI Type Descriptor.
-        // Reverse-engineered using a few C++ exception classes.
-        scope VisualCPPMangler v = new VisualCPPMangler(!global.params.mscoff);
-        v.buf.writestring("\1??_R0?AV");
-        v.mangleIdent(s);
-        v.buf.writestring("@8");
-        return v.buf.extractString();
-    }
-    else
-    {
-        assert(0);
-    }
+version (IN_LLVM)
+{
+    // Return the mangled name of the RTTI Type Descriptor.
+    // Reverse-engineered using a few C++ exception classes.
+    scope VisualCPPMangler v = new VisualCPPMangler(!global.params.mscoff);
+    v.buf.writestring("\1??_R0?AV");
+    v.mangleIdent(s);
+    v.buf.writestring("@8");
+    return v.buf.extractChars();
+}
+else
+{
+    assert(0);
+}
 }
 
+/**
+ * Issues an ICE and returns true if `type` is shared or immutable
+ *
+ * Params:
+ *      type = type to check
+ *
+ * Returns:
+ *      true if type is shared or immutable
+ *      false otherwise
+ */
+private bool checkImmutableShared(Type type)
+{
+    if (type.isImmutable() || type.isShared())
+    {
+        error(Loc.initial, "Internal Compiler Error: `shared` or `immutable` types cannot be mapped to C++ (%s)", type.toChars());
+        fatal();
+        return true;
+    }
+    return false;
+}
 private final class VisualCPPMangler : Visitor
 {
     enum VC_SAVED_TYPE_CNT = 10u;
@@ -77,6 +99,7 @@ private final class VisualCPPMangler : Visitor
     // This flag is set up by the visit(NextType, ) function  and should be reset when the arg type output is finished.
     // MANGLE_RETURN_TYPE: return type shouldn't be saved and substituted in arguments
     // IGNORE_CONST: in some cases we should ignore CV-modifiers.
+    // ESCAPE: toplevel const non-pointer types need a '$$C' escape in addition to a cv qualifier.
 
     enum Flags : int
     {
@@ -84,12 +107,14 @@ private final class VisualCPPMangler : Visitor
         MANGLE_RETURN_TYPE = 0x2,
         IGNORE_CONST = 0x4,
         IS_DMC = 0x8,
+        ESCAPE = 0x10,
     }
 
     alias IS_NOT_TOP_TYPE = Flags.IS_NOT_TOP_TYPE;
     alias MANGLE_RETURN_TYPE = Flags.MANGLE_RETURN_TYPE;
     alias IGNORE_CONST = Flags.IGNORE_CONST;
     alias IS_DMC = Flags.IS_DMC;
+    alias ESCAPE = Flags.ESCAPE;
 
     int flags;
     OutBuffer buf;
@@ -114,25 +139,31 @@ public:
 
     override void visit(Type type)
     {
-        if (type.isImmutable() || type.isShared())
-        {
-            type.error(Loc.initial, "Internal Compiler Error: `shared` or `immutable` types can not be mapped to C++ (%s)", type.toChars());
-        }
-        else
-        {
-            type.error(Loc.initial, "Internal Compiler Error: type `%s` can not be mapped to C++\n", type.toChars());
-        }
+        if (checkImmutableShared(type))
+            return;
+
+        error(Loc.initial, "Internal Compiler Error: type `%s` cannot be mapped to C++\n", type.toChars());
         fatal(); //Fatal, because this error should be handled in frontend
+    }
+
+    override void visit(TypeNull type)
+    {
+        if (checkImmutableShared(type))
+            return;
+        if (checkTypeSaved(type))
+            return;
+
+        buf.writestring("$$T");
+        flags &= ~IS_NOT_TOP_TYPE;
+        flags &= ~IGNORE_CONST;
     }
 
     override void visit(TypeBasic type)
     {
         //printf("visit(TypeBasic); is_not_top_type = %d\n", (int)(flags & IS_NOT_TOP_TYPE));
-        if (type.isImmutable() || type.isShared())
-        {
-            visit(cast(Type)type);
+        if (checkImmutableShared(type))
             return;
-        }
+
         if (type.isConst() && ((flags & IS_NOT_TOP_TYPE) || (flags & IS_DMC)))
         {
             if (checkTypeSaved(type))
@@ -150,7 +181,10 @@ public:
             case Tuns64:
             case Tint128:
             case Tuns128:
+version (IN_LLVM) {} else
+{
             case Tfloat80:
+}
             case Twchar:
                 if (checkTypeSaved(type))
                     return;
@@ -202,27 +236,32 @@ public:
         case Tfloat64:
             buf.writeByte('N');
             break;
+        case Tfloat80:
+version (IN_LLVM)
+{
+            // unlike DMD, LDC uses 64-bit `real` for Windows/MSVC targets,
+            // corresponding to MSVC++ long double
+            buf.writeByte('O');        // Visual C++ long double
+}
+else
+{
+            if (flags & IS_DMC)
+                buf.writestring("_Z"); // DigitalMars long double
+            else
+                buf.writestring("_T"); // Intel long double
+}
+            break;
         case Tbool:
             buf.writestring("_N");
             break;
         case Tchar:
             buf.writeByte('D');
             break;
-        case Tdchar:
-            buf.writeByte('I');
-            break;
-            // unsigned int
-        case Tfloat80:
-            if (flags & IS_DMC)
-                buf.writestring("_Z"); // DigitalMars long double
-            else
-                buf.writestring("_T"); // Intel long double
-            break;
         case Twchar:
-            if (flags & IS_DMC)
-                buf.writestring("_Y"); // DigitalMars wchar_t
-            else
-                buf.writestring("_W"); // Visual C++ wchar_t
+            buf.writestring("_S"); // Visual C++ char16_t (since C++11)
+            break;
+        case Tdchar:
+            buf.writestring("_U"); // Visual C++ char32_t (since C++11)
             break;
         default:
             visit(cast(Type)type);
@@ -270,11 +309,9 @@ public:
     override void visit(TypePointer type)
     {
         //printf("visit(TypePointer); is_not_top_type = %d\n", (int)(flags & IS_NOT_TOP_TYPE));
-        if (type.isImmutable() || type.isShared())
-        {
-            visit(cast(Type)type);
+        if (checkImmutableShared(type))
             return;
-        }
+
         assert(type.next);
         if (type.next.ty == Tfunction)
         {
@@ -335,11 +372,10 @@ public:
         //printf("visit(TypeReference); type = %s\n", type.toChars());
         if (checkTypeSaved(type))
             return;
-        if (type.isImmutable() || type.isShared())
-        {
-            visit(cast(Type)type);
+
+        if (checkImmutableShared(type))
             return;
-        }
+
         buf.writeByte('A'); // mutable
         if (global.params.is64bit)
             buf.writeByte('E');
@@ -373,43 +409,15 @@ public:
 
     override void visit(TypeStruct type)
     {
-        const id = type.sym.ident;
-        char c;
-        if (id == Id.__c_long_double)
-            c = 'O'; // VC++ long double
-        else if (id == Id.__c_long)
-            c = 'J'; // VC++ long
-        else if (id == Id.__c_ulong)
-            c = 'K'; // VC++ unsigned long
+        if (checkTypeSaved(type))
+            return;
+        //printf("visit(TypeStruct); is_not_top_type = %d\n", (int)(flags & IS_NOT_TOP_TYPE));
+        mangleModifier(type);
+        if (type.sym.isUnionDeclaration())
+            buf.writeByte('T');
         else
-            c = 0;
-        if (c)
-        {
-            if (type.isImmutable() || type.isShared())
-            {
-                visit(cast(Type)type);
-                return;
-            }
-            if (type.isConst() && ((flags & IS_NOT_TOP_TYPE) || (flags & IS_DMC)))
-            {
-                if (checkTypeSaved(type))
-                    return;
-            }
-            mangleModifier(type);
-            buf.writeByte(c);
-        }
-        else
-        {
-            if (checkTypeSaved(type))
-                return;
-            //printf("visit(TypeStruct); is_not_top_type = %d\n", (int)(flags & IS_NOT_TOP_TYPE));
-            mangleModifier(type);
-            if (type.sym.isUnionDeclaration())
-                buf.writeByte('T');
-            else
-                buf.writeByte(type.cppmangle == CPPMANGLE.asClass ? 'V' : 'U');
-            mangleIdent(type.sym);
-        }
+            buf.writeByte(type.cppmangle == CPPMANGLE.asClass ? 'V' : 'U');
+        mangleIdent(type.sym);
         flags &= ~IS_NOT_TOP_TYPE;
         flags &= ~IGNORE_CONST;
     }
@@ -429,13 +437,16 @@ public:
             c = "_J"; // VC++ long long
         else if (id == Id.__c_ulonglong)
             c = "_K"; // VC++ unsigned long long
+        else if (id == Id.__c_wchar_t)
+        {
+            c = (flags & IS_DMC) ? "_Y" : "_W";
+        }
+
         if (c.length)
         {
-            if (type.isImmutable() || type.isShared())
-            {
-                visit(cast(Type)type);
+            if (checkImmutableShared(type))
                 return;
-            }
+
             if (type.isConst() && ((flags & IS_NOT_TOP_TYPE) || (flags & IS_DMC)))
             {
                 if (checkTypeSaved(type))
@@ -449,38 +460,7 @@ public:
             if (checkTypeSaved(type))
                 return;
             mangleModifier(type);
-            buf.writeByte('W');
-            switch (type.sym.memtype.ty)
-            {
-            case Tchar:
-            case Tint8:
-                buf.writeByte('0');
-                break;
-            case Tuns8:
-                buf.writeByte('1');
-                break;
-            case Tint16:
-                buf.writeByte('2');
-                break;
-            case Tuns16:
-                buf.writeByte('3');
-                break;
-            case Tint32:
-                buf.writeByte('4');
-                break;
-            case Tuns32:
-                buf.writeByte('5');
-                break;
-            case Tint64:
-                buf.writeByte('6');
-                break;
-            case Tuns64:
-                buf.writeByte('7');
-                break;
-            default:
-                visit(cast(Type)type);
-                break;
-            }
+            buf.writestring("W4");
             mangleIdent(type.sym);
         }
         flags &= ~IS_NOT_TOP_TYPE;
@@ -526,7 +506,7 @@ public:
         {
             assert(0);
         }
-        return buf.extractString();
+        return buf.extractChars();
     }
 
 private:
@@ -541,7 +521,7 @@ private:
             // Pivate methods always non-virtual in D and it should be mangled as non-virtual in C++
             //printf("%s: isVirtualMethod = %d, isVirtual = %d, vtblIndex = %d, interfaceVirtual = %p\n",
                 //d.toChars(), d.isVirtualMethod(), d.isVirtual(), cast(int)d.vtblIndex, d.interfaceVirtual);
-            if (d.isVirtual() && (d.vtblIndex != -1 || d.interfaceVirtual || d.overrideInterface()))
+            if ((d.isVirtual() && (d.vtblIndex != -1 || d.interfaceVirtual || d.overrideInterface())) || (d.isDtorDeclaration() && d.parent.isClassDeclaration() && !d.isFinal()))
             {
                 switch (d.protection.kind)
                 {
@@ -603,7 +583,7 @@ private:
             // <flags> ::= Y <calling convention flag>
             buf.writeByte('Y');
         }
-        const(char)* args = mangleFunctionType(cast(TypeFunction)d.type, d.needThis(), d.isCtorDeclaration() || d.isDtorDeclaration());
+        const(char)* args = mangleFunctionType(cast(TypeFunction)d.type, d.needThis(), d.isCtorDeclaration() || isPrimaryDtor(d));
         buf.writestring(args);
     }
 
@@ -646,11 +626,10 @@ private:
         }
         char cv_mod = 0;
         Type t = d.type;
-        if (t.isImmutable() || t.isShared())
-        {
-            visit(t);
+
+        if (checkImmutableShared(t))
             return;
-        }
+
         if (t.isConst())
         {
             cv_mod = 'B'; // const
@@ -669,31 +648,304 @@ private:
         buf.writeByte(cv_mod);
     }
 
-    void mangleName(Dsymbol sym, bool dont_use_back_reference = false)
+    /**
+     * Computes mangling for symbols with special mangling.
+     * Params:
+     *      sym = symbol to mangle
+     * Returns:
+     *      mangling for special symbols,
+     *      null if not a special symbol
+     */
+    extern (D) static string mangleSpecialName(Dsymbol sym)
+    {
+        string mangle;
+        if (sym.isCtorDeclaration())
+            mangle = "?0";
+        else if (sym.isPrimaryDtor())
+            mangle = "?1";
+        else if (!sym.ident)
+            return null;
+        else if (sym.ident == Id.assign)
+            mangle = "?4";
+        else if (sym.ident == Id.eq)
+            mangle = "?8";
+        else if (sym.ident == Id.index)
+            mangle = "?A";
+        else if (sym.ident == Id.call)
+            mangle = "?R";
+        else if (sym.ident == Id.cppdtor)
+            mangle = "?_G";
+        else
+            return null;
+
+        return mangle;
+    }
+
+    /**
+     * Mangles an operator, if any
+     *
+     * Params:
+     *      ti                  = associated template instance of the operator
+     *      symName             = symbol name
+     *      firstTemplateArg    = index if the first argument of the template (because the corresponding c++ operator is not a template)
+     * Returns:
+     *      true if sym has no further mangling needed
+     *      false otherwise
+     */
+    bool mangleOperator(TemplateInstance ti, ref const(char)* symName, ref int firstTemplateArg)
+    {
+        auto whichOp = isCppOperator(ti.name);
+        final switch (whichOp)
+        {
+        case CppOperator.Unknown:
+            return false;
+        case CppOperator.Cast:
+            buf.writestring("?B");
+            return true;
+        case CppOperator.Assign:
+            symName = "?4";
+            return false;
+        case CppOperator.Eq:
+            symName = "?8";
+            return false;
+        case CppOperator.Index:
+            symName = "?A";
+            return false;
+        case CppOperator.Call:
+            symName = "?R";
+            return false;
+
+        case CppOperator.Unary:
+        case CppOperator.Binary:
+        case CppOperator.OpAssign:
+            TemplateDeclaration td = ti.tempdecl.isTemplateDeclaration();
+            assert(td);
+            assert(ti.tiargs.dim >= 1);
+            TemplateParameter tp = (*td.parameters)[0];
+            TemplateValueParameter tv = tp.isTemplateValueParameter();
+            if (!tv || !tv.valType.isString())
+                return false; // expecting a string argument to operators!
+            Expression exp = (*ti.tiargs)[0].isExpression();
+            StringExp str = exp.toStringExp();
+            switch (whichOp)
+            {
+            case CppOperator.Unary:
+                switch (str.peekSlice())
+                {
+                    case "*":   symName = "?D";     goto continue_template;
+                    case "++":  symName = "?E";     goto continue_template;
+                    case "--":  symName = "?F";     goto continue_template;
+                    case "-":   symName = "?G";     goto continue_template;
+                    case "+":   symName = "?H";     goto continue_template;
+                    case "~":   symName = "?S";     goto continue_template;
+                    default:    return false;
+                }
+            case CppOperator.Binary:
+                switch (str.peekSlice())
+                {
+                    case ">>":  symName = "?5";     goto continue_template;
+                    case "<<":  symName = "?6";     goto continue_template;
+                    case "*":   symName = "?D";     goto continue_template;
+                    case "-":   symName = "?G";     goto continue_template;
+                    case "+":   symName = "?H";     goto continue_template;
+                    case "&":   symName = "?I";     goto continue_template;
+                    case "/":   symName = "?K";     goto continue_template;
+                    case "%":   symName = "?L";     goto continue_template;
+                    case "^":   symName = "?T";     goto continue_template;
+                    case "|":   symName = "?U";     goto continue_template;
+                    default:    return false;
+                    }
+            case CppOperator.OpAssign:
+                switch (str.peekSlice())
+                {
+                    case "*":   symName = "?X";     goto continue_template;
+                    case "+":   symName = "?Y";     goto continue_template;
+                    case "-":   symName = "?Z";     goto continue_template;
+                    case "/":   symName = "?_0";    goto continue_template;
+                    case "%":   symName = "?_1";    goto continue_template;
+                    case ">>":  symName = "?_2";    goto continue_template;
+                    case "<<":  symName = "?_3";    goto continue_template;
+                    case "&":   symName = "?_4";    goto continue_template;
+                    case "|":   symName = "?_5";    goto continue_template;
+                    case "^":   symName = "?_6";    goto continue_template;
+                    default:    return false;
+                }
+            default: assert(0);
+            }
+        }
+        continue_template:
+        if (ti.tiargs.dim == 1)
+        {
+            buf.writestring(symName);
+            return true;
+        }
+        firstTemplateArg = 1;
+        return false;
+    }
+
+    /**
+     * Mangles a template value
+     *
+     * Params:
+     *      o               = expression that represents the value
+     *      tv              = template value
+     *      is_dmc_template = use DMC mangling
+     */
+    void manlgeTemplateValue(RootObject o,TemplateValueParameter tv, Dsymbol sym,bool is_dmc_template)
+    {
+        if (!tv.valType.isintegral())
+        {
+            sym.error("Internal Compiler Error: C++ %s template value parameter is not supported", tv.valType.toChars());
+            fatal();
+            return;
+        }
+        buf.writeByte('$');
+        buf.writeByte('0');
+        Expression e = isExpression(o);
+        assert(e);
+        if (tv.valType.isunsigned())
+        {
+            mangleNumber(e.toUInteger());
+        }
+        else if (is_dmc_template)
+        {
+            // NOTE: DMC mangles everything based on
+            // unsigned int
+            mangleNumber(e.toInteger());
+        }
+        else
+        {
+            sinteger_t val = e.toInteger();
+            if (val < 0)
+            {
+                val = -val;
+                buf.writeByte('?');
+            }
+            mangleNumber(val);
+        }
+    }
+
+    /**
+     * Mangles a template alias parameter
+     *
+     * Params:
+     *      o   = the alias value, a symbol or expression
+     */
+    void mangleTemplateAlias(RootObject o, Dsymbol sym)
+    {
+        Dsymbol d = isDsymbol(o);
+        Expression e = isExpression(o);
+
+        if (d && d.isFuncDeclaration())
+        {
+            buf.writeByte('$');
+            buf.writeByte('1');
+            mangleFunction(d.isFuncDeclaration());
+        }
+        else if (e && e.op == TOK.variable && (cast(VarExp)e).var.isVarDeclaration())
+        {
+            buf.writeByte('$');
+            if (flags & IS_DMC)
+                buf.writeByte('1');
+            else
+                buf.writeByte('E');
+            mangleVariable((cast(VarExp)e).var.isVarDeclaration());
+        }
+        else if (d && d.isTemplateDeclaration() && d.isTemplateDeclaration().onemember)
+        {
+            Dsymbol ds = d.isTemplateDeclaration().onemember;
+            if (flags & IS_DMC)
+            {
+                buf.writeByte('V');
+            }
+            else
+            {
+                if (ds.isUnionDeclaration())
+                {
+                    buf.writeByte('T');
+                }
+                else if (ds.isStructDeclaration())
+                {
+                    buf.writeByte('U');
+                }
+                else if (ds.isClassDeclaration())
+                {
+                    buf.writeByte('V');
+                }
+                else
+                {
+                    sym.error("Internal Compiler Error: C++ templates support only integral value, type parameters, alias templates and alias function parameters");
+                    fatal();
+                }
+            }
+            mangleIdent(d);
+        }
+        else
+        {
+            sym.error("Internal Compiler Error: `%s` is unsupported parameter for C++ template", o.toChars());
+            fatal();
+        }
+    }
+
+    /**
+     * Mangles a template alias parameter
+     *
+     * Params:
+     *      o   = type
+     */
+    void mangleTemplateType(RootObject o)
+    {
+        flags |= ESCAPE;
+        Type t = isType(o);
+        assert(t);
+        t.accept(this);
+        flags &= ~ESCAPE;
+    }
+
+    /**
+     * Mangles the name of a symbol
+     *
+     * Params:
+     *      sym   = symbol to mangle
+     *      dont_use_back_reference = dont use back referencing
+     */
+    void mangleName(Dsymbol sym, bool dont_use_back_reference)
     {
         //printf("mangleName('%s')\n", sym.toChars());
         const(char)* name = null;
         bool is_dmc_template = false;
-        if (sym.isDtorDeclaration())
+
+        if (string s = mangleSpecialName(sym))
         {
-            buf.writestring("?1");
+            buf.writestring(s);
             return;
         }
+
         if (TemplateInstance ti = sym.isTemplateInstance())
         {
+            auto id = ti.tempdecl.ident;
+            const(char)* symName = id.toChars();
+
+            int firstTemplateArg = 0;
+
+            // test for special symbols
+            if (mangleOperator(ti,symName,firstTemplateArg))
+                return;
+
             scope VisualCPPMangler tmp = new VisualCPPMangler((flags & IS_DMC) ? true : false);
             tmp.buf.writeByte('?');
             tmp.buf.writeByte('$');
-            tmp.buf.writestring(ti.name.toChars());
-            tmp.saved_idents[0] = ti.name.toChars();
-            tmp.buf.writeByte('@');
+            tmp.buf.writestring(symName);
+            tmp.saved_idents[0] = symName;
+            if (symName == id.toChars())
+                tmp.buf.writeByte('@');
             if (flags & IS_DMC)
             {
                 tmp.mangleIdent(sym.parent, true);
                 is_dmc_template = true;
             }
             bool is_var_arg = false;
-            for (size_t i = 0; i < ti.tiargs.dim; i++)
+            for (size_t i = firstTemplateArg; i < ti.tiargs.dim; i++)
             {
                 RootObject o = (*ti.tiargs)[i];
                 TemplateParameter tp = null;
@@ -714,103 +966,15 @@ private:
                 }
                 if (tv)
                 {
-                    if (tv.valType.isintegral())
-                    {
-                        tmp.buf.writeByte('$');
-                        tmp.buf.writeByte('0');
-                        Expression e = isExpression(o);
-                        assert(e);
-                        if (tv.valType.isunsigned())
-                        {
-                            tmp.mangleNumber(e.toUInteger());
-                        }
-                        else if (is_dmc_template)
-                        {
-                            // NOTE: DMC mangles everything based on
-                            // unsigned int
-                            tmp.mangleNumber(e.toInteger());
-                        }
-                        else
-                        {
-                            sinteger_t val = e.toInteger();
-                            if (val < 0)
-                            {
-                                val = -val;
-                                tmp.buf.writeByte('?');
-                            }
-                            tmp.mangleNumber(val);
-                        }
-                    }
-                    else
-                    {
-                        sym.error("Internal Compiler Error: C++ %s template value parameter is not supported", tv.valType.toChars());
-                        fatal();
-                    }
+                    tmp.manlgeTemplateValue(o, tv, sym, is_dmc_template);
                 }
                 else if (!tp || tp.isTemplateTypeParameter())
                 {
-                    Type t = isType(o);
-                    assert(t);
-                    t.accept(tmp);
+                    tmp.mangleTemplateType(o);
                 }
                 else if (tp.isTemplateAliasParameter())
                 {
-                    Dsymbol d = isDsymbol(o);
-                    Expression e = isExpression(o);
-                    if (!d && !e)
-                    {
-                        sym.error("Internal Compiler Error: `%s` is unsupported parameter for C++ template", o.toChars());
-                        fatal();
-                    }
-                    if (d && d.isFuncDeclaration())
-                    {
-                        tmp.buf.writeByte('$');
-                        tmp.buf.writeByte('1');
-                        tmp.mangleFunction(d.isFuncDeclaration());
-                    }
-                    else if (e && e.op == TOK.variable && (cast(VarExp)e).var.isVarDeclaration())
-                    {
-                        tmp.buf.writeByte('$');
-                        if (flags & IS_DMC)
-                            tmp.buf.writeByte('1');
-                        else
-                            tmp.buf.writeByte('E');
-                        tmp.mangleVariable((cast(VarExp)e).var.isVarDeclaration());
-                    }
-                    else if (d && d.isTemplateDeclaration() && d.isTemplateDeclaration().onemember)
-                    {
-                        Dsymbol ds = d.isTemplateDeclaration().onemember;
-                        if (flags & IS_DMC)
-                        {
-                            tmp.buf.writeByte('V');
-                        }
-                        else
-                        {
-                            if (ds.isUnionDeclaration())
-                            {
-                                tmp.buf.writeByte('T');
-                            }
-                            else if (ds.isStructDeclaration())
-                            {
-                                tmp.buf.writeByte('U');
-                            }
-                            else if (ds.isClassDeclaration())
-                            {
-                                tmp.buf.writeByte('V');
-                            }
-                            else
-                            {
-                                sym.error("Internal Compiler Error: C++ templates support only integral value, type parameters, alias templates and alias function parameters");
-                                fatal();
-                            }
-                        }
-                        tmp.mangleIdent(d);
-                    }
-                    else
-                    {
-                        sym.error("Internal Compiler Error: `%s` is unsupported parameter for C++ template: (%s)", o.toChars());
-                        fatal();
-                    }
+                    tmp.mangleTemplateAlias(o, sym);
                 }
                 else
                 {
@@ -818,10 +982,11 @@ private:
                     fatal();
                 }
             }
-            name = tmp.buf.extractString();
+            name = tmp.buf.extractChars();
         }
         else
         {
+            // Not a template
             name = sym.ident.toChars();
         }
         assert(name);
@@ -903,6 +1068,9 @@ private:
         while (p && !p.isModule())
         {
             mangleName(p, dont_use_back_reference);
+            // Mangle our string namespaces as well
+            for (auto ns = p.cppnamespace; ns !is null; ns = ns.cppnamespace)
+                mangleName(ns, dont_use_back_reference);
             p = p.toParent();
             if (p.toParent() && p.toParent().isTemplateInstance())
             {
@@ -967,20 +1135,24 @@ private:
     {
         if (flags & IGNORE_CONST)
             return;
-        if (type.isImmutable() || type.isShared())
-        {
-            visit(type);
+        if (checkImmutableShared(type))
             return;
-        }
+
         if (type.isConst())
         {
-            if (flags & IS_NOT_TOP_TYPE)
+            // Template parameters that are not pointers and are const need an $$C escape
+            // in addition to 'B' (const).
+            if ((flags & ESCAPE) && type.ty != Tpointer)
+                buf.writestring("$$CB");
+            else if (flags & IS_NOT_TOP_TYPE)
                 buf.writeByte('B'); // const
             else if ((flags & IS_DMC) && type.ty != Tpointer)
                 buf.writestring("_O");
         }
         else if (flags & IS_NOT_TOP_TYPE)
             buf.writeByte('A'); // mutable
+
+        flags &= ~ESCAPE;
     }
 
     void mangleArray(TypeSArray type)
@@ -1022,7 +1194,7 @@ private:
                 tmp.buf.writeByte('A');
                 break;
             case LINK.cpp:
-                if (needthis && type.varargs != 1)
+                if (needthis && type.parameterList.varargs != VarArg.variadic)
                     tmp.buf.writeByte('E'); // thiscall
                 else
                     tmp.buf.writeByte('A'); // cdecl
@@ -1052,11 +1224,15 @@ private:
             if (type.isref)
                 rettype = rettype.referenceTo();
             flags &= ~IGNORE_CONST;
-            if (rettype.ty == Tstruct || rettype.ty == Tenum)
+            if (rettype.ty == Tstruct)
+            {
+                tmp.buf.writeByte('?');
+                tmp.buf.writeByte('A');
+            }
+            else if (rettype.ty == Tenum)
             {
                 const id = rettype.toDsymbol(null).ident;
-                if (id != Id.__c_long_double && id != Id.__c_long && id != Id.__c_ulong &&
-                    id != Id.__c_longlong && id != Id.__c_ulonglong)
+                if (!isSpecialEnumIdent(id))
                 {
                     tmp.buf.writeByte('?');
                     tmp.buf.writeByte('A');
@@ -1066,9 +1242,9 @@ private:
             rettype.accept(tmp);
             tmp.flags &= ~MANGLE_RETURN_TYPE;
         }
-        if (!type.parameters || !type.parameters.dim)
+        if (!type.parameterList.parameters || !type.parameterList.parameters.dim)
         {
-            if (type.varargs == 1)
+            if (type.parameterList.varargs == VarArg.variadic)
                 tmp.buf.writeByte('Z');
             else
                 tmp.buf.writeByte('X');
@@ -1085,14 +1261,14 @@ private:
                 else if (p.storageClass & STC.lazy_)
                 {
                     // Mangle as delegate
-                    Type td = new TypeFunction(null, t, 0, LINK.d);
+                    Type td = new TypeFunction(ParameterList(), t, LINK.d);
                     td = new TypeDelegate(td);
                     t = merge(t);
                 }
                 if (t.ty == Tsarray)
                 {
-                    t.error(Loc.initial, "Internal Compiler Error: unable to pass static array to `extern(C++)` function.");
-                    t.error(Loc.initial, "Use pointer instead.");
+                    error(Loc.initial, "Internal Compiler Error: unable to pass static array to `extern(C++)` function.");
+                    error(Loc.initial, "Use pointer instead.");
                     assert(0);
                 }
                 tmp.flags &= ~IS_NOT_TOP_TYPE;
@@ -1101,8 +1277,8 @@ private:
                 return 0;
             }
 
-            Parameter._foreach(type.parameters, &mangleParameterDg);
-            if (type.varargs == 1)
+            Parameter._foreach(type.parameterList.parameters, &mangleParameterDg);
+            if (type.parameterList.varargs == VarArg.variadic)
             {
                 tmp.buf.writeByte('Z');
             }
@@ -1112,7 +1288,7 @@ private:
             }
         }
         tmp.buf.writeByte('Z');
-        const(char)* ret = tmp.buf.extractString();
+        const(char)* ret = tmp.buf.extractChars();
         memcpy(&saved_idents, &tmp.saved_idents, (const(char)*).sizeof * VC_SAVED_IDENT_CNT);
         memcpy(&saved_types, &tmp.saved_types, Type.sizeof * VC_SAVED_TYPE_CNT);
         return ret;

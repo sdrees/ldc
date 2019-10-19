@@ -1,3 +1,228 @@
+# LDC 1.18.0 (2019-10-16)
+
+#### Big news
+- Frontend, druntime and Phobos are at version [2.088.1](https://dlang.org/changelog/2.088.1.html). (#3143, #3161, #3176, #3190)
+- Support for **LLVM 9.0**. The prebuilt packages have been upgraded to [LLVM 9.0.0](http://releases.llvm.org/9.0.0/docs/ReleaseNotes.html). (#3166)
+- Preliminary **Android** CI, incl. experimental prebuilt armv7a package generation (API level 21, i.e., Android 5+). (#3164)
+- Bundled dub upgraded to v1.17.0+ with improved LDC support, incl. cross-compilation (e.g., `--arch=x86_64-pc-windows-msvc`). (https://github.com/dlang/dub/pull/1755, [Wiki](https://wiki.dlang.org/Cross-compiling_with_LDC))
+- Init symbols of zero-initialized structs are no longer emitted. (#3131)
+- druntime: DMD-compatible `{load,store}Unaligned` and `prefetch` added to `core.simd`. (https://github.com/ldc-developers/druntime/pull/163)
+- JIT improvements, incl. multi-threaded compilation. (#2758, #3154, #3174)
+
+#### Platform support
+- Supports LLVM 3.9 - 9.0.
+
+#### Bug fixes
+- Don't error out when initializing a `void` vector. (#3130, #3139)
+- druntime: Fix exception chaining for latest MSVC runtime v14.23, shipping with Visual Studio 2019 v16.3. (https://github.com/ldc-developers/druntime/pull/164)
+- Keep lvalue-ness when casting associative array to another AA. (#3162, #3179)
+
+# LDC 1.17.0 (2019-08-25)
+
+#### Big news
+- Frontend, druntime and Phobos are at version [2.087.1+](https://dlang.org/changelog/2.087.1.html). (#3093, #3124)
+  - The upstream fix wrt. [local templates can now receive local symbols](https://issues.dlang.org/show_bug.cgi?id=5710) hasn't been ported yet. (#3125)
+- LLVM for prebuilt packages upgraded to v8.0.1. (#3113)
+- Breaking change: Init symbols, TypeInfos and vtables of non-`export`ed aggregates are now hidden with `-fvisibility=hidden`. (#3129)
+- LLVM 8+: New intrinsics `llvm_*_sat` (saturation arithmetic) and `llvm_{min,max}imum`. Thanks Stefanos! (https://github.com/ldc-developers/druntime/pull/161, https://github.com/ldc-developers/druntime/pull/162)
+
+#### Platform support
+- Supports LLVM 3.9 - 8.0.
+
+#### Bug fixes
+- Fix for v1.16.0 regression when returning `void` expressions. (#3094, #3095)
+- `-lowmem` (and on Windows, `--DRT-*` options) in response files (e.g., used by dub) aren't ignored anymore. (#3086)
+- Windows: LDC and LDMD now internally use UTF-8 strings only, incl. command-line options and environment variables. The LDC install dir, source file names etc. can now contain non-ASCII chars. For proper console output, especially to stderr, you'll need Windows 10 v1809+ and may need to set a Unicode console font (e.g., Consolas). (#611, #3086)
+- Android: Linker errors when building LDC/LDMD should be fixed. (#3128)
+- Support for recent `gdmd` as D host compiler. Thanks Moritz! (#3087)
+- Do not require gold plugin when linking with LLD. (#3105)
+- Enable linker stripping on FreeBSD (with non-`bfd` linkers). (#3106)
+- Some JIT bind fixes. (#3099, #3100)
+
+#### Known issues
+- If you encounter segfaults in GC worker threads with shared druntime on Linux that are fixed by disabling new parallel GC marking (e.g., via `--DRT-gcopt=parallel:0` in executable cmdline), please let us know about it: #3127
+
+# LDC 1.16.0 (2019-06-20)
+
+#### Big news
+- Frontend, druntime and Phobos are at version [2.086.1](https://dlang.org/changelog/2.086.1.html), incl. a DIP1008 fix. (#3062, #3076, #3091)
+- Non-Windows x86: Faster `real` versions of `std.math.{tan,expi}`. (#2855)
+- dcompute: New `__traits(getTargetInfo, "dcomputeTargets")`. (#3090)
+
+#### Platform support
+- Supports LLVM 3.9 - 8.0 (incl. 7.1).
+
+#### Bug fixes
+- Make `pragma(LDC_no_typeinfo)` actually elide TypeInfo emission for structs, classes and interfaces. (#3068)
+- Windows: Fix DLL entry point in MinGW-based libs. (https://github.com/ldc-developers/mingw-w64-libs/commit/8d930c129daa798379b3d563617847f8e895f43e)
+- WebAssembly: Use `--export-dynamic` when linking with LLD 8+. (#3023, #3072)
+- Fix corrupt `this` in functions nested in in/out contracts. (45460a1)
+- Fix identity comparisons of integral vectors. (a44c78f)
+- Improved handling of unsupported vector ops. (a44c78f)
+- uClibc: Fix C assert calls. (#3078, #3082)
+- Improved error message on global variable collision. (#3080, #3081)
+
+# LDC 1.15.0 (2019-04-06)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.085.1**, incl. new command-line options `-preview`, `-revert`, `-checkaction=context`, `-verrors-context` and `-extern-std`. (#3003, #3039, #3053)
+  - The Objective-C improvements from DMD 2.085 are not implemented. (#3007)
+- Support for **LLVM 8.0**. The prebuilt packages have been upgraded to LLVM 8.0.0 and include the Khronos SPIRV-LLVM-Translator, so that dcompute can now emit **OpenCL** too. (#3005)
+- Compiler memory requirements can now be reduced via the new `-lowmem` switch, which enables the garbage collector for the front-end and sacrifices compile times for less required memory. In some cases, the overall max process memory can be reduced by more than 60%; see https://github.com/ldc-developers/ldc/pull/2916#issuecomment-443433594 for some numbers. (#2916)
+  - Note for package maintainers: this feature requires a recent D host compiler (most notably, it doesn't work with ltsmaster), ideally LDC 1.15 itself due to important GC memory overhead improvements in 2.085 druntime.
+- Support for generic `@llvmAttr("name")` parameter UDAs, incl. new `@restrict` with C-like semantics. (#3043)
+- macOS: 32-bit support was dropped in the sense of not being CI-tested anymore and the prebuilt macOS package now containing x86_64 libraries only. `MACOSX_DEPLOYMENT_TARGET` for the prebuilt package has been raised from 10.8 to 10.9.
+- Prebuilt packages don't depend on libtinfo and libedit anymore. (#1827, #3019)
+- x86: SSSE3 isn't required for the prebuilt packages and generated optimized binaries anymore. (#3045)
+
+#### Platform support
+- Supports LLVM 3.9 - 8.0.
+
+#### Bug fixes
+- Implicit cross-module-inlining of functions annotated with `pragma(inline, true)` without explicit `-enable-cross-module-inlining` has been restored. (#2552, #3014)
+- Propagate well-known length of newly allocated dynamic arrays for better optimizability. (#3041, #3042)
+- JIT: Support implicit `__chkstk` calls for Windows targets, e.g., for large stack allocations. (#3051)
+
+#### Internals
+- Addition of **Azure Pipelines** as CI service. It is the new main CI service and responsible for creating all prebuilt x86(_64) packages. AppVeyor has been dropped completely and CircleCI rededicated. (#2998)
+
+# LDC 1.14.0 (2019-02-17)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.084.1**, incl. new command-line options `-mixin`, `-{enable,disable}-switch-errors` and `-checkaction`. (#2946, #2977, #2999)
+  - Options `-release`, `-d-debug` and `-unittest` don't override preceding, more specific options (`-{enable,disable}-{asserts,invariants,preconditions,postconditions,contracts}`) anymore.
+- Linking WebAssembly doesn't require `-link-internally` (integrated LLD) anymore; an external linker (default: `wasm-ld`, override with `-linker`) can be used as well. (#2951)
+- Prebuilt Windows packages include LTO-able 32-bit druntime/Phobos too (previously: Win64 only).
+- AddressSanitizer support for fibers (requires [rebuilding the runtime libraries](https://wiki.dlang.org/Building_LDC_runtime_libraries) with CMake option `RT_SUPPORT_SANITIZERS=ON`).  (#2975, https://github.com/ldc-developers/druntime/pull/152)
+- Support `pragma(LDC_extern_weak)` for function declarations - if the function isn't available when linking, its address is null. (#2984)
+
+#### Platform support
+- Supports LLVM 3.9 - 7.0.
+
+#### Bug fixes
+- Fix C++ mangling regression for functions with multiple `real` parameters introduced with v1.13, preventing to build DMD. (#2954, https://github.com/dlang/dmd/pull/9129)
+- Fix context of some nested aggregates. (#2960, #2969)
+- Support templated LLVM intrinsics with vector arguments. (#2962, #2971)
+- Avoid crashes with `-allinst` (fix emission of only speculatively nested functions). (#2932, #2940)
+- Fix XRay support for LLVM 7+. (#2965)
+- AArch64: Fix DMD-style profile measurements. (#2950)
+- Be less picky about placement of pragmas (allow intermediate `extern(C)` etc.). (#2599)
+- MSVC: Fix `real` C++ mangling to match Visual C++ `long double`. (#2974)
+- Fix bad ICE noticed when building protobuf-d. (#2990, #2992)
+- Fix ICE when directly indexing vector return value. (#2988, #2991)
+- Fix identity comparisons of complex numbers. (#2918, #2993)
+- MIPS32 fix for `core.stdc.stdarg`. (#2989, https://github.com/ldc-developers/druntime/pull/153)
+- Fix `core.atomic.cas()` for 64-bit floating-point values. (#3000, #3001)
+
+#### Known issues
+- Buggy older `ld.bfd` linker versions may wrongly strip out required symbols, e.g., ModuleInfos (so that e.g. no module ctors/dtors are run). LDC defaults to `ld.gold` on Linux.
+
+# LDC 1.13.0 (2018-12-16)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.083.1**. (#2878, #2893, #2920, #2933)
+- The **Windows packages are now fully self-sufficient**, i.e., a Visual Studio/C++ Build Tools installation isn't required anymore, as we now ship with MinGW-w64-based libraries, similar to DMD. Check out the included [README.txt](https://github.com/ldc-developers/ldc/blob/master/packaging/README.txt) for all relevant details. (https://github.com/dlang/installer/pull/346, https://github.com/ldc-developers/ldc/pull/2886, [Wiki: Cross-compiling with LDC](https://wiki.dlang.org/Cross-compiling_with_LDC))
+- Debug info improvements:
+  * For GDB: printing global and imported symbols, non-member and member function calls. (#2826)
+  * For Visual Studio and mago: names, by-value params, nested variables. (#2895, #2908, #2909, #2912)
+  * Associative arrays now showing up properly (at least with mago), not as opaque `void*` anymore. (#2869)
+  * `-gc` now translates D names to C++ ones, e.g., to use the regular Visual Studio debugger (bypassing mago) and as preparation for VS Code debugging with Microsoft's C/C++ plug-in ([screenshots](https://github.com/ldc-developers/ldc/pull/2869#issuecomment-427862154)). Thanks to Oleksandr for this contribution and the AA fix! (#2869)
+- New command-line option `-fvisibility=hidden` to hide functions/globals not marked as `export` (for non-Windows targets), primarily to reduce the size of shared libraries. Thanks to Andrey for stepping up! (#2894, #2923)
+- Dropped support for LLVM 3.7 and 3.8. (#2872)
+- LLVM for prebuilt packages upgraded to [v7.0.1](https://github.com/ldc-developers/llvm/releases/tag/ldc-v7.0.1).
+- Linux: now defaulting to `ld.gold` linker in general, not just with `-flto=thin`, as buggy older `ld.bfd` versions may wrongly strip out required symbols (change with `-linker`). (#2870)
+- Improved support for Android/x86[_64], musl libc and FreeBSD/AArch64. (#2917, https://github.com/ldc-developers/druntime/pull/146)
+- LDC-specific druntime: `ldc.simd.inlineIR` moved/renamed to `ldc.llvmasm.__ir` (with deprecated legacy alias). (#2931)
+- New CMake option `COMPILE_D_MODULES_SEPARATELY` builds D files in the DDMD frontend separately to reduce the time required to build LDC with many CPU cores and/or for iterative development. (#2914)
+
+#### Platform support
+- Supports LLVM 3.9 - 7.0.
+- Alpine linux/x64: built against Musl libc to support Docker images based on the Alpine distro, requires the `llvm5-libs`, `musl-dev`, `binutils-gold` and `gcc` packages to build and link D apps and the `tzdata` and `curl-dev` packages for certain stdlib modules.
+
+#### Bug fixes
+- 32-bit Android/ARM regression introduced in v1.12. (#2892)
+- Non-Windows x86_64 ABI fixes wrt. what's passed in registers, relevant for C[++] interop. (#2864)
+- Alignment of `scope` allocated class instances. (#2919)
+
+
+# LDC 1.12.0 (2018-10-13)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.082.1**. (#2818, #2837, #2858, #2873)
+  - Significant performance improvements for some transcendental `std.math` functions in single and double precision, at least for x86. (https://github.com/dlang/phobos/pull/6272#issuecomment-373967109)
+- Support for **LLVM 7**, which is used for the prebuilt packages. Due to an LLVM 7.0.0 [regression](https://bugs.llvm.org/show_bug.cgi?id=38289), the prebuilt x86[_64] LDC binaries require a **CPU with SSSE3**, and so will your optimized binaries (unless compiling with `-mattr=-ssse3`). (#2850)
+- **JIT compilation**: new `ldc.dynamic_compile.bind` function with interface similar to C++ `std::bind`, allowing to generate efficient specialized versions of functions (much like [Easy::jit](https://github.com/jmmartinez/easy-just-in-time) for C++). (#2726)
+- LTO now working for Win64 too; the prebuilt package includes the required external LLD linker and the optional LTO default libs. Enable as usual with `-flto=<thin|full> [-defaultlib=druntime-ldc-lto,phobos2-ldc-lto]`. (#2774)
+- Config file: new `lib-dirs` array for directories to be searched for libraries, incl. LLVM compiler-rt libraries. (#2790)
+
+#### Platform support
+- Supports LLVM 3.7 - 7.0.
+- Windows: Supports Visual Studio/C++ Build Tools 2015 and 2017.
+- Alpine linux/x64: built against Musl libc to support Docker images based on the Alpine distro, requires the `llvm5-libs`, `musl-dev`, and `gcc` packages to build and link D apps and the `tzdata` and `libcurl` packages for certain stdlib modules.
+- Android/ARM: This release slightly changes the way emulated TLS is interfaced, but is missing a patch for 32-bit ARM. [See the wiki for instructions on patching that file manually before cross-compiling the runtime libraries for 32-bit Android/ARM](https://wiki.dlang.org/Build_D_for_Android).
+
+#### Bug fixes
+- Fix IR-based PGO on Windows (requires our LLVM fork). (#2539)
+- Fix C++ class construction with D `new` on Posix. (#2801)
+- Android: No more text relocations in Phobos zlib, required for API level 23+. (#2822, #2835)
+- Declare extern const/immutable globals as IR constants. (#2849, #2852)
+- Fix issue when emitting both object and textual assembly files at once (`-output-o -output-s`). (#2847)
+- Support address of struct member as key/value in AA literal. (#2859, #2860)
+- Fix ICE when computing addresses relative to functions/labels. (#2865, #2867)
+
+
+# LDC 1.11.0 (2018-08-18)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.081.2**. (#2752, #2772, #2776, #2791, #2815)
+  - Add some support for classes without TypeInfos, for `-betterC` and/or a minimal (d)runtime. (#2765)
+- LLVM for prebuilt packages upgraded to v6.0.1. The x86_64 packages feature some more LLVM targets for cross-compilation (experiments): MIPS, MSP430, RISC-V and WebAssembly. (#2760)
+- Rudimentary support for compiling & linking directly to **WebAssembly**. See the [dedicated Wiki page](https://wiki.dlang.org/Generating_WebAssembly_with_LDC) for how to get started. (#2766, #2779, #2785)
+- **AArch64** (64-bit ARM) now mostly working on Linux/glibc and Android. Current `ltsmaster`/0.17.6 is able to bootstrap v1.11, which can also bootstrap itself; most tests pass. (Preliminary) [CI](https://app.shippable.com/github/ldc-developers/ldc/dashboard) has been set up. (#2802, #2817, #2813)
+- LDC on Windows now uses 80-bit **compile-time** `real`s. This allows for seamless cross-compilation to other x86(_64) targets, e.g., without `real.min` underflowing to 0 and `real.max` overflowing to infinity. (#2752)
+- New `@naked` UDA in `ldc.attributes` & enhanced functionality for `@llvmAttr("<name>")`. (#2773)
+
+#### Platform support
+- Supports LLVM 3.7 - 6.0.
+- Windows: Supports Visual Studio/C++ Build Tools 2015 and 2017.
+
+#### Bug fixes
+- `extern(C++)` on Posix: Pass non-PODs indirectly by value. (#2728)
+- `extern(C++)` on Windows/MSVC: Methods return *all* structs via hidden sret pointer. (#2720, #1935)
+- Make GC2Stack IR optimization pass work as intended. (#2750)
+- Work around inline assembly regression with LLVM 6 on Win32. The prebuilt Win32 package is now using LLVM 6.0.1 too. (#2629, #2770)
+- Fix overzealous check for multiple `main()` functions. (#2778)
+- Fix corrupt prefix in integrated LLD's console output. (#2781)
+- No context ptr for nested non-`extern(D)` functions. (#2808, #2809)
+
+# LDC 1.10.0 (2018-06-19)
+
+#### Big news
+- Frontend, druntime and Phobos are at version **2.080.1**. (#2665, #2719, #2737)
+  - No support for Objective-C class/static methods yet. (#2670)
+- Breaking Win64 `extern(D)` ABI change: Pass vectors directly in registers, analogous to the MS vector calling convention. (#2714)
+- Config file: For cross-compilation, support additional sections named as regex for specific target triples, e.g., `"86(_64)?-.*-linux": { … };`; see the comment in `etc/ldc2.conf`. (#2718)
+
+#### Platform support
+- Supports LLVM 3.7 - 6.0.
+- Windows: Supports Visual Studio/C++ Build Tools 2015 and 2017.
+
+#### Bug fixes
+- CMake and druntime fixes for DragonFlyBSD, thanks Diederik! (#2690, #2691, #2692, https://github.com/ldc-developers/druntime/pull/138, https://github.com/ldc-developers/druntime/pull/139, https://github.com/ldc-developers/phobos/pull/64)
+- DMD-style inline asm label naming issue in overloaded functions. (#2667, #2694)
+- Linux: misc. exception stack trace fixes & extensions, incl. default DWARF v4 debuginfo emission with LLVM 6. (#2677)
+- Predefine version `D_HardFloat` instead of `D_SoftFloat` for `-float-abi=softfp`. (#2678)
+- Bash completion installed to the wrong place with custom `CMAKE_INSTALL_PREFIX`. (#2679, #2179, #2693)
+- Default to `ld.gold` linker for ThinLTO on Linux. (#2696)
+- Fix compilation issues on 64-bit macOS with DMD host compiler ≥ 2.079. (#2703, #2704)
+- druntime: Fix `core.stdc.stdint.(u)int64_t` on 64-bit macOS etc. (#2700)
+- Define `D_AVX` and `D_AVX2` if the target supports them. (#2711)
+- Fix sporadic front-end segfaults. (#2713)
+- Win64: Fix `extern(C++)` ABI wrt. passing small non-POD structs by value. (#2706)
+- Misc. druntime/Phobos fixes and upstream cherry-picks for ARM, AArch64, MIPS etc.
+- Fix potential LDC crashes when returning static array results from inline IR. (#2729)
+- Win64: Fix terminate handler for VC runtime DLL version 14.14.x.y. (#2739)
+
 # LDC 1.9.0 (2018-04-30)
 
 #### Big news
@@ -379,6 +604,20 @@
 
 #### Internals
 - Linking against LLVM shared library is now supported.
+
+# LDC 0.17.6 (2018-08-24)
+
+#### News
+- Added support for **LLVM 6.0 and 7.0**. (https://github.com/ldc-developers/ldc/pull/2600, https://github.com/ldc-developers/ldc/pull/2825)
+- Backported **AArch64** fixes from master; most tests passing on Linux/glibc and Android. (https://github.com/ldc-developers/ldc/pull/2575, https://github.com/ldc-developers/ldc/pull/2811, https://github.com/ldc-developers/phobos/pull/49, https://github.com/ldc-developers/phobos/pull/50, https://github.com/ldc-developers/phobos/pull/51, https://github.com/ldc-developers/phobos/pull/52, https://github.com/ldc-developers/phobos/pull/53, https://github.com/ldc-developers/phobos/pull/54, https://github.com/ldc-developers/phobos/pull/55, https://github.com/ldc-developers/phobos/pull/56)
+- Fix generation of debug info. (https://github.com/ldc-developers/ldc/pull/2594)
+- Added support for bootstrapping on **DragonFly BSD**. (https://github.com/ldc-developers/ldc/pull/2580, https://github.com/ldc-developers/ldc/pull/2593, https://github.com/ldc-developers/ldc/pull/2689, https://github.com/ldc-developers/druntime/pull/110, https://github.com/ldc-developers/phobos/pull/45)
+- Fixed missing definition in `std.datetime` on Solaris. (https://github.com/ldc-developers/phobos/pull/46)
+- Fixed `std.datetime` unittest failure. (https://github.com/ldc-developers/phobos/pull/59)
+- Fixed tests for PowerPC. (https://github.com/ldc-developers/ldc/pull/2634, https://github.com/ldc-developers/ldc/pull/2635)
+- Improvements for **MIPS**.
+- Make `core.stdc.stdarg.va_*` functions `nothrow` to enable compiling the **2.082** frontend. (https://github.com/ldc-developers/ldc/pull/2821)
+- CI updates.
 
 # LDC 0.17.5 (2017-09-12)
 

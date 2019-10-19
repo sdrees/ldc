@@ -1,47 +1,35 @@
 
 /* Compiler implementation of the D programming language
- * Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
+ * Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
  * written by Walter Bright
  * http://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
  * http://www.boost.org/LICENSE_1_0.txt
- * https://github.com/dlang/dmd/blob/master/src/module.h
+ * https://github.com/dlang/dmd/blob/master/src/dmd/module.h
  */
 
-#ifndef DMD_MODULE_H
-#define DMD_MODULE_H
-
-#ifdef __DMC__
 #pragma once
-#endif /* __DMC__ */
 
-#include "root.h"
 #include "dsymbol.h"
 
-class ClassDeclaration;
 struct ModuleDeclaration;
 struct Macro;
 struct Escape;
-class VarDeclaration;
-class Library;
+struct FileBuffer;
 
 #if IN_LLVM
-#include <cstdint>
-class DValue;
 namespace llvm {
+    class GlobalVariable;
     class LLVMContext;
     class Module;
-    class GlobalVariable;
-    class StructType;
 }
 #endif
-
 
 enum PKG
 {
     PKGunknown, // not yet determined whether it's a package.d or not
     PKGmodule,  // already determined that's an actual package.d
-    PKGpackage, // already determined that's an actual package
+    PKGpackage  // already determined that's an actual package
 };
 
 class Package : public ScopeDsymbol
@@ -52,8 +40,6 @@ public:
     Module *mod;        // != NULL if isPkgMod == PKGmodule
 
     const char *kind() const;
-
-    static DsymbolTable *resolve(Identifiers *packages, Dsymbol **pparent, Package **ppkg);
 
     Package *isPackage() { return this; }
 
@@ -75,26 +61,23 @@ public:
     static Dsymbols deferred2;  // deferred Dsymbol's needing semantic2() run on them
     static Dsymbols deferred3;  // deferred Dsymbol's needing semantic3() run on them
     static unsigned dprogress;  // progress resolving the deferred list
-    /**
-     * A callback function that is called once an imported module is
-     * parsed. If the callback returns true, then it tells the
-     * frontend that the driver intends on compiling the import.
-     */
-    static bool (*onImport)(Module);
+
     static void _init();
 
     static AggregateDeclaration *moduleinfo;
 
 
-    const char *arg;    // original argument name
+    DString arg;        // original argument name
     ModuleDeclaration *md; // if !NULL, the contents of the ModuleDeclaration declaration
-    File *srcfile;      // input source file
-    File *objfile;      // output .obj file
-    File *hdrfile;      // 'header' file
-    File *docfile;      // output documentation file
+    FileName srcfile;   // input source file
+    FileName objfile;   // output .obj file
+    FileName hdrfile;   // 'header' file
+    FileName docfile;   // output documentation file
+    FileBuffer *srcBuffer; // set during load(), free'd in parse()
     unsigned errors;    // if any errors in file
     unsigned numlines;  // number of lines in source file
-    int isDocFile;      // if it is a documentation input file, not D source
+    bool isHdrFile;     // if it is a header (.di) file
+    bool isDocFile;     // if it is a documentation input file, not D source
     bool isPackageFile; // if it is a package.d
     Strings contentImportedFiles;  // array of files whose content was imported
     int needmoduleinfo;
@@ -137,9 +120,7 @@ public:
     static Module *load(Loc loc, Identifiers *packages, Identifier *ident);
 
     const char *kind() const;
-    File *setOutfile(const char *name, const char *dir, const char *arg, const char *ext);
-    void setDocfile();
-    bool read(Loc loc); // read file, returns 'true' if succeed, 'false' otherwise.
+    bool read(const Loc &loc); // read file, returns 'true' if succeed, 'false' otherwise.
     Module *parse();    // syntactic parse
     void importAll(Scope *sc);
     int needModuleInfo();
@@ -147,13 +128,9 @@ public:
     bool isPackageAccessible(Package *p, Prot protection, int flags = 0);
     Dsymbol *symtabInsert(Dsymbol *s);
     void deleteObjFile();
-    static void addDeferredSemantic(Dsymbol *s);
-    static void addDeferredSemantic2(Dsymbol *s);
-    static void addDeferredSemantic3(Dsymbol *s);
     static void runDeferredSemantic();
     static void runDeferredSemantic2();
     static void runDeferredSemantic3();
-    static void clearCache();
     int imports(Module *m);
 
     bool isRoot() { return this->importedFrom == this; }
@@ -179,7 +156,7 @@ public:
 #if IN_LLVM
     // LDC
     llvm::Module* genLLVMModule(llvm::LLVMContext& context);
-    void checkAndAddOutputFile(File *file);
+    void checkAndAddOutputFile(const FileName &file);
     void makeObjectFilenameUnique();
 
     bool llvmForceLogging;
@@ -204,7 +181,5 @@ struct ModuleDeclaration
     bool isdeprecated;  // if it is a deprecated module
     Expression *msg;
 
-    const char *toChars();
+    const char *toChars() const;
 };
-
-#endif /* DMD_MODULE_H */

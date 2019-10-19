@@ -12,8 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_GEN_CLASSES_H
-#define LDC_GEN_CLASSES_H
+#pragma once
 
 #include "gen/structs.h"
 
@@ -33,7 +32,7 @@ llvm::Constant *DtoDefineClassInfo(ClassDeclaration *cd);
 DValue *DtoNewClass(Loc &loc, TypeClass *type, NewExp *newexp);
 void DtoInitClass(TypeClass *tc, llvm::Value *dst);
 void DtoFinalizeClass(Loc &loc, llvm::Value *inst);
-void DtoFinalizeScopeClass(Loc &loc, llvm::Value *inst, ClassDeclaration *cd);
+void DtoFinalizeScopeClass(Loc &loc, llvm::Value *inst, bool hasDtor);
 
 DValue *DtoCastClass(Loc &loc, DValue *val, Type *to);
 DValue *DtoDynamicCastObject(Loc &loc, DValue *val, Type *to);
@@ -42,5 +41,3 @@ DValue *DtoDynamicCastInterface(Loc &loc, DValue *val, Type *to);
 
 llvm::Value *DtoVirtualFunctionPointer(DValue *inst, FuncDeclaration *fdecl,
                                        const char *name);
-
-#endif

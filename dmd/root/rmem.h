@@ -1,14 +1,13 @@
-/**
- * Compiler implementation of the
- * $(LINK2 http://www.dlang.org, D programming language).
- *
- * Copyright:   Copyright (C) 1999-2018 by The D Language Foundation, All Rights Reserved
- * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
- * License:     $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
+
+/* Copyright (C) 1999-2019 by The D Language Foundation, All Rights Reserved
+ * All Rights Reserved, written by Walter Bright
+ * http://www.digitalmars.com
+ * Distributed under the Boost Software License, Version 1.0.
+ * http://www.boost.org/LICENSE_1_0.txt
+ * https://github.com/dlang/dmd/blob/master/src/dmd/root/rmem.h
  */
 
-#ifndef ROOT_MEM_H
-#define ROOT_MEM_H
+#pragma once
 
 #include <stddef.h>     // for size_t
 
@@ -17,6 +16,10 @@
      * than D's 'uint'
      */
     typedef unsigned d_size_t;
+#elif __APPLE__ && __LP64__ && LDC_HOST_DigitalMars && LDC_HOST_FE_VER >= 2079 && LDC_HOST_FE_VER <= 2081
+    /* DMD versions between 2.079 and 2.081 mapped D ulong to uint64_t on OS X.
+     */
+    typedef unsigned long long d_size_t;
 #else
     typedef size_t d_size_t;
 #endif
@@ -26,14 +29,20 @@ struct Mem
     Mem() { }
 
     static char *xstrdup(const char *s);
+    static void xfree(void *p);
     static void *xmalloc(d_size_t size);
     static void *xcalloc(d_size_t size, d_size_t n);
     static void *xrealloc(void *p, d_size_t size);
-    static void xfree(void *p);
-    static void *xmallocdup(void *o, d_size_t size);
     static void error();
+
+#if 1 // version (GC)
+    static bool _isGCEnabled;
+
+    static bool isGCEnabled();
+    static void disableGC();
+    static void addRange(const void *p, d_size_t size);
+    static void removeRange(const void *p);
+#endif
 };
 
 extern Mem mem;
-
-#endif /* ROOT_MEM_H */

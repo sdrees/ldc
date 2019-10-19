@@ -12,8 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LDC_DRIVER_CL_OPTIONS_H
-#define LDC_DRIVER_CL_OPTIONS_H
+#pragma once
 
 #include "driver/cl_options-llvm.h"
 #include "driver/targetmachine.h"
@@ -46,7 +45,6 @@ extern cl::list<std::string> fileList;
 extern cl::list<std::string> runargs;
 extern cl::opt<bool> invokedByLDMD;
 extern cl::opt<bool> compileOnly;
-extern cl::opt<bool> useDIP1000;
 extern cl::opt<bool> noAsm;
 extern cl::opt<bool> dontWriteObj;
 extern cl::opt<std::string> objectFile;
@@ -63,8 +61,11 @@ extern cl::list<std::string> jsonFields;
 extern cl::opt<std::string> hdrDir;
 extern cl::opt<std::string> hdrFile;
 extern cl::opt<bool> hdrKeepAllBodies;
+extern cl::opt<std::string> mixinFile;
 extern cl::list<std::string> versions;
 extern cl::list<std::string> transitions;
+extern cl::list<std::string> previews;
+extern cl::list<std::string> reverts;
 extern cl::opt<std::string> moduleDeps;
 extern cl::opt<std::string> cacheDir;
 extern cl::list<std::string> linkerSwitches;
@@ -78,13 +79,12 @@ extern cl::opt<std::string> mABI;
 extern FloatABI::Type floatABI;
 extern cl::opt<bool> linkonceTemplates;
 extern cl::opt<bool> disableLinkerStripDead;
+extern cl::opt<unsigned char> defaultToHiddenVisibility;
 
 // Math options
 extern bool fFastMath;
 extern llvm::FastMathFlags defaultFMF;
 void setDefaultMathOptions(llvm::TargetOptions &targetOptions);
-
-extern bool invReleaseMode;
 
 // Arguments to -d-debug
 extern std::vector<std::string> debugArgs;
@@ -93,7 +93,6 @@ extern std::vector<std::string> debugArgs;
 void createClashingOptions();
 void hideLLVMOptions();
 
-#if LDC_LLVM_VER >= 309
 // LTO options
 enum LTOKind {
   LTO_None,
@@ -103,10 +102,6 @@ enum LTOKind {
 extern cl::opt<LTOKind> ltoMode;
 inline bool isUsingLTO() { return ltoMode != LTO_None; }
 inline bool isUsingThinLTO() { return ltoMode == LTO_Thin; }
-#else
-inline bool isUsingLTO() { return false; }
-inline bool isUsingThinLTO() { return false; }
-#endif
 
 #if LDC_LLVM_VER >= 400
 extern cl::opt<std::string> saveOptimizationRecord;
@@ -123,4 +118,3 @@ extern cl::opt<bool> dynamicCompileTlsWorkaround;
 constexpr bool enableDynamicCompile = false;
 #endif
 }
-#endif

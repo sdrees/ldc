@@ -7,8 +7,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "target.h"
 #include "gen/nested.h"
+
+#include "dmd/errors.h"
+#include "dmd/target.h"
 #include "gen/dvalue.h"
 #include "gen/funcgenstate.h"
 #include "gen/functions.h"
@@ -72,7 +74,7 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
     if (cd->isClassDeclaration()) {
       val = DtoLoad(val);
     }
-    ctx = DtoLoad(DtoGEPi(val, 0, getVthisIdx(cd), ".vthis"));
+    ctx = DtoLoad(DtoGEP(val, 0, getVthisIdx(cd), ".vthis"));
     skipDIDeclaration = true;
   } else {
     Logger::println("Regular nested function, using context arg");
@@ -83,16 +85,46 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
   IF_LOG { Logger::cout() << "Context: " << *ctx << '\n'; }
 
   DtoCreateNestedContextType(vdparent->isFuncDeclaration());
+
   assert(isIrLocalCreated(vd));
+  IrLocal *const irLocal = getIrLocal(vd);
+
+  // The variable may not actually be nested in a speculative context (e.g.,
+  // with `-allinst`, see https://github.com/ldc-developers/ldc/issues/2932).
+  // Use an invalid null storage in that case, so that accessing the var at
+  // runtime will cause a segfault.
+  if (irLocal->nestedIndex == -1) {
+    Logger::println(
+        "WARNING: isn't actually nested, using invalid null storage");
+    auto llType = DtoPtrToType(astype);
+    if (isSpecialRefVar(vd))
+      llType = llType->getPointerTo();
+    return makeVarDValue(astype, vd, llvm::ConstantPointerNull::get(llType));
+  }
 
   ////////////////////////////////////
   // Extract variable from nested context
 
+  assert(irfunc->frameType);
   const auto frameType = LLPointerType::getUnqual(irfunc->frameType);
   IF_LOG { Logger::cout() << "casting to: " << *irfunc->frameType << '\n'; }
   LLValue *val = DtoBitCast(ctx, frameType);
 
-  IrLocal *const irLocal = getIrLocal(vd);
+  // Make the DWARF variable address relative to the context pointer (ctx);
+  // register all ops (offsetting, dereferencing) required to get there in the
+  // following list.
+  LLSmallVector<int64_t, 4> dwarfAddrOps;
+
+  const auto offsetToNthField = [&val, &dwarfAddrOps](unsigned fieldIndex,
+                                                      const char *name = "") {
+    gIR->DBuilder.OpOffset(dwarfAddrOps, val, fieldIndex);
+    val = DtoGEP(val, 0, fieldIndex, name);
+  };
+  const auto dereference = [&val, &dwarfAddrOps](const char *name = "") {
+    gIR->DBuilder.OpDeref(dwarfAddrOps);
+    val = DtoAlignedLoad(val, name);
+  };
+
   const auto vardepth = irLocal->nestedDepth;
   const auto funcdepth = irfunc->depth;
 
@@ -110,20 +142,13 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
   } else {
     // Load frame pointer and index that...
     IF_LOG Logger::println("Lower depth");
-    val = DtoGEPi(val, 0, vardepth);
+    offsetToNthField(vardepth);
     IF_LOG Logger::cout() << "Frame index: " << *val << '\n';
-    val = DtoAlignedLoad(
-        val, (std::string(".frame.") + vdparent->toChars()).c_str());
+    dereference((std::string(".frame.") + vdparent->toChars()).c_str());
     IF_LOG Logger::cout() << "Frame: " << *val << '\n';
   }
 
-  const auto idx = irLocal->nestedIndex;
-  assert(idx != -1 && "Nested context not yet resolved for variable.");
-
-  LLSmallVector<int64_t, 2> dwarfAddrOps;
-
-  LLValue *gep = DtoGEPi(val, 0, idx, vd->toChars());
-  val = gep;
+  offsetToNthField(irLocal->nestedIndex, vd->toChars());
   IF_LOG {
     Logger::cout() << "Addr: " << *val << '\n';
     Logger::cout() << "of type: " << *val->getType() << '\n';
@@ -134,8 +159,8 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
     // storage of pointer (reference lvalue).
   } else if (byref || isRefOrOut) {
     val = DtoAlignedLoad(val);
-    // ref/out variables get a reference-debuginfo-type in EmitLocalVariable();
-    // pass the GEP as reference lvalue in that case.
+    // ref/out variables get a reference-debuginfo-type in EmitLocalVariable()
+    // => don't dereference, use reference lvalue as address
     if (!isRefOrOut)
       gIR->DBuilder.OpDeref(dwarfAddrOps);
     IF_LOG {
@@ -146,11 +171,9 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
 
   if (!skipDIDeclaration && global.params.symdebug) {
 #if LDC_LLVM_VER < 500
-    // Because we are passing a GEP instead of an alloca to
-    // llvm.dbg.declare, we have to make the address dereference explicit.
     gIR->DBuilder.OpDeref(dwarfAddrOps);
 #endif
-    gIR->DBuilder.EmitLocalVariable(gep, vd, nullptr, false,
+    gIR->DBuilder.EmitLocalVariable(ctx, vd, nullptr, false,
                                     /*forceAsLocal=*/true, false, dwarfAddrOps);
   }
 
@@ -176,7 +199,7 @@ void DtoResolveNestedContext(Loc &loc, AggregateDeclaration *decl,
     DtoResolveDsymbol(decl);
 
     unsigned idx = getVthisIdx(decl);
-    LLValue *gep = DtoGEPi(value, 0, idx, ".vthis");
+    LLValue *gep = DtoGEP(value, 0, idx, ".vthis");
     DtoStore(DtoBitCast(nest, gep->getType()->getContainedType(0)), gep);
   }
 }
@@ -233,7 +256,7 @@ LLValue *DtoNestedContext(Loc &loc, Dsymbol *sym) {
       // function (but without any variables in the nested context).
       return val;
     }
-    val = DtoLoad(DtoGEPi(val, 0, getVthisIdx(ad), ".vthis"));
+    val = DtoLoad(DtoGEP(val, 0, getVthisIdx(ad), ".vthis"));
   } else {
     if (sym->isFuncDeclaration()) {
       // If we are here, the function actually needs its nested context
@@ -249,18 +272,8 @@ LLValue *DtoNestedContext(Loc &loc, Dsymbol *sym) {
     return llvm::ConstantPointerNull::get(getVoidPtrType());
   }
 
-  FuncDeclaration *frameToPass = nullptr;
-  if (AggregateDeclaration *ad = sym->isAggregateDeclaration()) {
-    // If sym is a nested struct or a nested class, pass the frame
-    // of the function where sym is declared.
-    frameToPass = ad->toParent()->isFuncDeclaration();
-  } else if (FuncDeclaration *symfd = sym->isFuncDeclaration()) {
-    // If sym is a nested function, and its parent context is different
-    // than the one we got, adjust it.
-    frameToPass = getParentFunc(symfd);
-  }
-
-  if (frameToPass) {
+  // The symbol may need a parent context of the current function.
+  if (FuncDeclaration *frameToPass = getParentFunc(sym)) {
     IF_LOG Logger::println("Parent frame is from %s", frameToPass->toChars());
     FuncDeclaration *ctxfd = irFunc.decl;
     IF_LOG Logger::println("Current function is %s", ctxfd->toChars());
@@ -287,7 +300,7 @@ LLValue *DtoNestedContext(Loc &loc, Dsymbol *sym) {
     } else {
       val = DtoBitCast(val,
                        LLPointerType::getUnqual(getIrFunc(ctxfd)->frameType));
-      val = DtoGEPi(val, 0, neededDepth);
+      val = DtoGEP(val, 0, neededDepth);
       val = DtoAlignedLoad(
           val, (std::string(".frame.") + frameToPass->toChars()).c_str());
     }
@@ -388,7 +401,7 @@ static void DtoCreateNestedContextType(FuncDeclaration *fd) {
     } else if (vd->isParameter() && (vd->storage_class & STClazy)) {
       // The LL type is a delegate (LL struct).
       // Depending on the used TargetABI, the LL parameter is either a struct or
-      // a pointer to a struct (`byval` attribute, ExplicitByvalRewrite).
+      // a pointer to a struct (`byval` attribute, IndirectByvalRewrite).
       t = getIrParameter(vd)->value->getType();
       if (t->isPointerTy())
         t = t->getPointerElementType();
@@ -453,19 +466,19 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
         if (cd->isStructDeclaration()) {
           src = DtoExtractValue(thisval, getVthisIdx(cd), ".vthis");
         } else {
-          src = DtoLoad(DtoGEPi(thisval, 0, getVthisIdx(cd), ".vthis"));
+          src = DtoLoad(DtoGEP(thisval, 0, getVthisIdx(cd), ".vthis"));
         }
       }
       if (depth > 1) {
         src = DtoBitCast(src, getVoidPtrType());
         LLValue *dst = DtoBitCast(frame, getVoidPtrType());
-        DtoMemCpy(dst, src, DtoConstSize_t((depth - 1) * Target::ptrsize),
+        DtoMemCpy(dst, src, DtoConstSize_t((depth - 1) * target.ptrsize),
                   getABITypeAlign(getVoidPtrType()));
       }
       // Copy nestArg into framelist; the outer frame is not in the list of
       // pointers
       src = DtoBitCast(src, frameType->getContainedType(depth - 1));
-      LLValue *gep = DtoGEPi(frame, 0, depth - 1);
+      LLValue *gep = DtoGEP(frame, 0, depth - 1);
       DtoAlignedStore(src, gep);
     }
 
@@ -480,7 +493,7 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
       }
 
       IrLocal *irLocal = getIrLocal(vd);
-      LLValue *gep = DtoGEPi(frame, 0, irLocal->nestedIndex, vd->toChars());
+      LLValue *gep = DtoGEP(frame, 0, irLocal->nestedIndex, vd->toChars());
       if (vd->isParameter()) {
         IF_LOG Logger::println("nested param: %s", vd->toChars());
         LOG_SCOPE

@@ -7,6 +7,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "dmd/ctfe.h"
+#include "dmd/errors.h"
+#include "dmd/template.h"
 #include "gen/arrays.h"
 #include "gen/binops.h"
 #include "gen/classes.h"
@@ -21,9 +24,6 @@
 #include "ir/irfunction.h"
 #include "ir/irtypeclass.h"
 #include "ir/irtypestruct.h"
-#include "template.h"
-// Needs other includes.
-#include "ctfe.h"
 
 /// Emits an LLVM constant corresponding to the expression.
 ///
@@ -47,6 +47,20 @@ public:
     result = nullptr;
     e->accept(this);
     return result;
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+
+  void fatalError(Expression *e) {
+    if (!global.gag) {
+      fatal();
+    }
+
+    // Do not return null here, as AssocArrayLiteralExp::toElem determines
+    // whether it can allocate the needed arrays statically by just invoking
+    // toConstElem on its key/value expressions, and handling the null value
+    // consequently would require error-prone adaptions in all other code.
+    result = llvm::UndefValue::get(DtoType(e->type));
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -175,11 +189,7 @@ public:
           llvm::GlobalValue::PrivateLinkage;
       gvar = new llvm::GlobalVariable(gIR->module, _init->getType(), true,
                                       _linkage, _init, ".str");
-#if LDC_LLVM_VER >= 309
       gvar->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-#else
-      gvar->setUnnamedAddr(true);
-#endif
       (*stringLiteralCache)[key] = gvar;
     }
 
@@ -214,13 +224,10 @@ public:
       dinteger_t idx = undoStrideMul(e->loc, t1b, e->e2->toInteger());
       result = llvm::ConstantExpr::getGetElementPtr(
           isaPointer(ptr)->getElementType(), ptr, DtoConstSize_t(idx));
-    } else {
-      e->error("expression `%s` is not a constant", e->toChars());
-      if (!global.gag) {
-        fatal();
-      }
-      result = llvm::UndefValue::get(DtoType(e->type));
+      return;
     }
+
+    visit(static_cast<Expression *>(e));
   }
 
   void visit(MinExp *e) override {
@@ -236,13 +243,10 @@ public:
       llvm::Constant *negIdx = llvm::ConstantExpr::getNeg(DtoConstSize_t(idx));
       result = llvm::ConstantExpr::getGetElementPtr(
           isaPointer(ptr)->getElementType(), ptr, negIdx);
-    } else {
-      e->error("expression `%s` is not a constant", e->toChars());
-      if (!global.gag) {
-        fatal();
-      }
-      result = llvm::UndefValue::get(DtoType(e->type));
+      return;
     }
+
+    visit(static_cast<Expression *>(e));
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -308,7 +312,7 @@ public:
         assert(i_index != ~0UL);
 
         // offset pointer
-        instance = DtoGEPi(instance, 0, i_index);
+        instance = DtoGEP(instance, 0, i_index);
       }
       result = DtoBitCast(instance, DtoType(tb));
     } else {
@@ -319,10 +323,7 @@ public:
   Lerr:
     e->error("cannot cast `%s` to `%s` at compile time", e->e1->type->toChars(),
              e->type->toChars());
-    if (!global.gag) {
-      fatal();
-    }
-    result = llvm::UndefValue::get(DtoType(e->type));
+    fatalError(e);
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -377,9 +378,11 @@ public:
       VarExp *vexp = static_cast<VarExp *>(e->e1);
       LLConstant *c = DtoConstSymbolAddress(e->loc, vexp->var);
       result = c ? DtoBitCast(c, DtoType(e->type)) : nullptr;
+      return;
     }
+
     // address of indexExp
-    else if (e->e1->op == TOKindex) {
+    if (e->e1->op == TOKindex) {
       IndexExp *iexp = static_cast<IndexExp *>(e->e1);
 
       // indexee must be global static array var
@@ -405,38 +408,39 @@ public:
       // bitcast to requested type
       assert(e->type->toBasetype()->ty == Tpointer);
       result = DtoBitCast(gep, DtoType(e->type));
-    } else if (e->e1->op == TOKstructliteral) {
+      return;
+    }
+
+    if (e->e1->op == TOKstructliteral) {
       StructLiteralExp *se = static_cast<StructLiteralExp *>(e->e1);
 
-      if (se->globalVar) {
+      result = p->getStructLiteralConstant(se);
+      if (result) {
         IF_LOG Logger::cout()
-            << "Returning existing global: " << *se->globalVar << '\n';
-        result = se->globalVar;
+            << "Returning existing global: " << *result << '\n';
         return;
       }
 
       auto globalVar = new llvm::GlobalVariable(
           p->module, DtoType(se->type), false,
           llvm::GlobalValue::InternalLinkage, nullptr, ".structliteral");
-      globalVar->setAlignment(DtoAlignment(se->type));
+      globalVar->setAlignment(LLMaybeAlign(DtoAlignment(se->type)));
 
-      se->globalVar = globalVar;
+      p->setStructLiteralConstant(se, globalVar);
       llvm::Constant *constValue = toConstElem(se);
-      se->globalVar = p->setGlobalVarInitializer(globalVar, constValue);
+      constValue = p->setGlobalVarInitializer(globalVar, constValue);
+      p->setStructLiteralConstant(se, constValue);
 
-      result = se->globalVar;
-    } else if (e->e1->op == TOKslice) {
-      e->error("non-constant expression `%s`", e->toChars());
-      if (!global.gag) {
-        fatal();
-      }
-      result = llvm::UndefValue::get(DtoType(e->type));
+      result = constValue;
+      return;
     }
-    // not yet supported
-    else {
-      e->error("constant expression `%s` not yet implemented", e->toChars());
-      fatal();
+
+    if (e->e1->op == TOKslice || e->e1->op == TOKdotvar) {
+      visit(static_cast<Expression *>(e));
+      return;
     }
+
+    llvm_unreachable("unsupported AddrExp in ToConstElemVisitor");
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -468,10 +472,7 @@ public:
       if (!fd->toParent2()->isModule()) {
         e->error("non-constant nested delegate literal expression `%s`",
                  e->toChars());
-        if (!global.gag) {
-          fatal();
-        }
-        result = llvm::UndefValue::get(DtoType(e->type));
+        fatalError(e);
         return;
       }
     }
@@ -519,12 +520,8 @@ public:
     auto gvar = new llvm::GlobalVariable(
         gIR->module, initval->getType(), canBeConst,
         llvm::GlobalValue::InternalLinkage, initval, ".dynarrayStorage");
-#if LDC_LLVM_VER >= 309
     gvar->setUnnamedAddr(canBeConst ? llvm::GlobalValue::UnnamedAddr::Global
                                     : llvm::GlobalValue::UnnamedAddr::None);
-#else
-    gvar->setUnnamedAddr(canBeConst);
-#endif
     llvm::Constant *store = DtoBitCast(gvar, getPtrToType(arrtype));
 
     if (bt->ty == Tpointer) {
@@ -584,14 +581,14 @@ public:
     DtoResolveClass(origClass);
     StructLiteralExp *value = e->value;
 
-    if (value->globalVar) {
-      IF_LOG Logger::cout()
-          << "Using existing global: " << *value->globalVar << '\n';
+    result = p->getStructLiteralConstant(value);
+    if (result) {
+      IF_LOG Logger::cout() << "Using existing global: " << *result << '\n';
     } else {
       auto globalVar = new llvm::GlobalVariable(
           p->module, origClass->type->ctype->isClass()->getMemoryLLType(),
           false, llvm::GlobalValue::InternalLinkage, nullptr, ".classref");
-      value->globalVar = globalVar;
+      p->setStructLiteralConstant(value, globalVar);
 
       std::map<VarDeclaration *, llvm::Constant *> varInits;
 
@@ -628,11 +625,11 @@ public:
 
       llvm::Constant *constValue =
           getIrAggr(origClass)->createInitializerConstant(varInits);
+      constValue = p->setGlobalVarInitializer(globalVar, constValue);
+      p->setStructLiteralConstant(value, constValue);
 
-      value->globalVar = p->setGlobalVarInitializer(globalVar, constValue);
+      result = constValue;
     }
-
-    result = value->globalVar;
 
     if (e->type->ty == Tclass) {
       ClassDeclaration *targetClass = static_cast<TypeClass *>(e->type)->sym;
@@ -646,7 +643,7 @@ public:
         assert(i_index != ~0UL);
 
         // offset pointer
-        result = DtoGEPi(result, 0, i_index);
+        result = DtoGEP(result, 0, i_index);
       }
     }
 
@@ -715,15 +712,7 @@ public:
 
   void visit(Expression *e) override {
     e->error("expression `%s` is not a constant", e->toChars());
-    if (!global.gag) {
-      fatal();
-    }
-
-    // Do not return null here, as AssocArrayLiteralExp::toElem determines
-    // whether it can allocate the needed arrays statically by just invoking
-    // toConstElem on its key/value expressions, and handling the null value
-    // consequently would require error-prone adaptions in all other code.
-    result = llvm::UndefValue::get(DtoType(e->type));
+    fatalError(e);
   }
 };
 

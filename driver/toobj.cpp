@@ -9,6 +9,7 @@
 
 #include "driver/toobj.h"
 
+#include "dmd/errors.h"
 #include "driver/cl_options.h"
 #include "driver/cache.h"
 #include "driver/targetmachine.h"
@@ -18,9 +19,7 @@
 #include "gen/optimizer.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/Verifier.h"
-#if LDC_LLVM_VER >= 309
 #include "llvm/Analysis/ModuleSummaryAnalysis.h"
-#endif
 #if LDC_LLVM_VER >= 400
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -33,9 +32,6 @@
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Path.h"
-#ifdef LDC_LLVM_SUPPORTED_TARGET_SPIRV
-#include "llvm/Support/SPIRV.h"
-#endif
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #if LDC_LLVM_VER >= 600
@@ -43,7 +39,11 @@
 #else
 #include "llvm/Target/TargetSubtargetInfo.h"
 #endif
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/IR/Module.h"
+#ifdef LDC_LLVM_SUPPORTED_TARGET_SPIRV
+#include "LLVMSPIRVLib/LLVMSPIRVLib.h"
+#endif
 #include <cstddef>
 #include <fstream>
 
@@ -52,20 +52,30 @@ static llvm::cl::opt<bool>
                           llvm::cl::Hidden,
                           llvm::cl::desc("Disable integrated assembler"));
 
+namespace {
+
 // based on llc code, University of Illinois Open Source License
-static void codegenModule(llvm::TargetMachine &Target, llvm::Module &m,
-                          llvm::raw_fd_ostream &out,
-                          llvm::TargetMachine::CodeGenFileType fileType) {
+void codegenModule(llvm::TargetMachine &Target, llvm::Module &m,
+                   const char *filename,
+                   llvm::TargetMachine::CodeGenFileType fileType) {
   using namespace llvm;
 
-// Create a PassManager to hold and optimize the collection of passes we are
-// about to build.
-  legacy::PassManager Passes;
-  ComputeBackend::Type cb = getComputeTargetType(&m);
+  const ComputeBackend::Type cb = getComputeTargetType(&m);
 
   if (cb == ComputeBackend::SPIRV) {
 #ifdef LDC_LLVM_SUPPORTED_TARGET_SPIRV
     IF_LOG Logger::println("running createSPIRVWriterPass()");
+#if LDC_LLVM_VER >= 900
+    std::ofstream out(filename, std::ofstream::binary);
+#else
+    std::error_code errinfo;
+    llvm::raw_fd_ostream out(filename, errinfo, llvm::sys::fs::F_None);
+    if (errinfo) {
+      error(Loc(), "cannot write file '%s': %s", filename,
+            errinfo.message().c_str());
+      fatal();
+    }
+#endif
     llvm::createSPIRVWriterPass(out)->runOnModule(m);
     IF_LOG Logger::println("Success.");
 #else
@@ -75,26 +85,44 @@ static void codegenModule(llvm::TargetMachine &Target, llvm::Module &m,
     return;
   }
 
+  std::error_code errinfo;
+  llvm::raw_fd_ostream out(filename, errinfo, llvm::sys::fs::F_None);
+  if (errinfo) {
+    error(Loc(), "cannot write file '%s': %s", filename,
+          errinfo.message().c_str());
+    fatal();
+  }
+
   // The DataLayout is already set at the module (in module.cpp,
   // method Module::genLLVMModule())
   // FIXME: Introduce new command line switch default-data-layout to
   // override the module data layout
 
+  // Create a PassManager to hold and optimize the collection of passes we are
+  // about to build.
+  legacy::PassManager Passes;
+
   // Add internal analysis passes from the target machine.
   Passes.add(
       createTargetTransformInfoWrapperPass(Target.getTargetIRAnalysis()));
 
-  if (Target.addPassesToEmitFile(Passes,
-                                 out,
-        // Always generate assembly for ptx as it is an assembly format
-        // The PTX backend fails if we pass anything else.
-        (cb == ComputeBackend::NVPTX) ? llvm::TargetMachine::CGFT_AssemblyFile
-                                      : fileType,
+  if (Target.addPassesToEmitFile(
+          Passes,
+          out, // Output file
+#if LDC_LLVM_VER >= 700
+          nullptr, // DWO output file
+#endif
+          // Always generate assembly for ptx as it is an assembly format
+          // The PTX backend fails if we pass anything else.
+          (cb == ComputeBackend::NVPTX) ? llvm::TargetMachine::CGFT_AssemblyFile
+                                        : fileType,
           codeGenOptLevel())) {
     llvm_unreachable("no support for asm output");
   }
 
   Passes.run(m);
+}
+
 }
 
 static void assemble(const std::string &asmpath, const std::string &objpath) {
@@ -245,19 +273,8 @@ public:
 
 void writeObjectFile(llvm::Module *m, const char *filename) {
   IF_LOG Logger::println("Writing object file to: %s", filename);
-  std::error_code errinfo;
-  {
-    llvm::raw_fd_ostream out(filename, errinfo, llvm::sys::fs::F_None);
-    if (!errinfo)
-    {
-      codegenModule(*gTargetMachine, *m, out,
-                    llvm::TargetMachine::CGFT_ObjectFile);
-    } else {
-      error(Loc(), "cannot write object file '%s': %s", filename,
-            errinfo.message().c_str());
-      fatal();
-    }
-  }
+  codegenModule(*gTargetMachine, *m, filename,
+                llvm::TargetMachine::CGFT_ObjectFile);
 }
 
 bool shouldAssembleExternally() {
@@ -273,9 +290,6 @@ bool shouldOutputObjectFile() {
 }
 
 bool shouldDoLTO(llvm::Module *m) {
-#if LDC_LLVM_VER < 309
-  return false;
-#else
 #if LDC_LLVM_VER == 309
   // LLVM 3.9 bug: can't do ThinLTO with modules that have module-scope inline
   // assembly blocks (duplicate definitions upon importing from such a module).
@@ -284,7 +298,6 @@ bool shouldDoLTO(llvm::Module *m) {
     return false;
 #endif
   return opts::isUsingLTO();
-#endif
 }
 } // end of anonymous namespace
 
@@ -334,11 +347,13 @@ void writeModule(llvm::Module *m, const char *filename) {
       std::count_if(outputFlags.begin(), outputFlags.end(),
                     [](OUTPUTFLAG flag) { return flag != 0; });
 
-  const auto replaceExtensionWith = [=](const char *ext) -> std::string {
+  const auto replaceExtensionWith =
+      [=](const DArray<const char> &ext) -> std::string {
     if (numOutputFiles == 1)
       return filename;
     llvm::SmallString<128> buffer(filename);
-    llvm::sys::path::replace_extension(buffer, ext);
+    llvm::sys::path::replace_extension(buffer,
+                                       llvm::StringRef(ext.ptr, ext.length));
     return buffer.str();
   };
 
@@ -365,7 +380,6 @@ void writeModule(llvm::Module *m, const char *filename) {
 #endif
 
     if (opts::isUsingThinLTO()) {
-#if LDC_LLVM_VER >= 309
       Logger::println("Creating module summary for ThinLTO");
 #if LDC_LLVM_VER == 309
       // When the function freq info callback is set to nullptr, LLVM will
@@ -384,7 +398,6 @@ void writeModule(llvm::Module *m, const char *filename) {
 
       llvm::WriteBitcodeToFile(M, bos, true, &moduleSummaryIndex,
                                /* generate ThinLTO hash */ true);
-#endif
     } else {
       llvm::WriteBitcodeToFile(M, bos);
     }
@@ -405,6 +418,7 @@ void writeModule(llvm::Module *m, const char *filename) {
     m->print(aos, &annotator);
   }
 
+  const bool writeObj = outputObj && !emitBitcodeAsObjectFile;
   // write native assembly
   if (global.params.output_s || assembleExternally) {
     std::string spath;
@@ -417,17 +431,21 @@ void writeModule(llvm::Module *m, const char *filename) {
     }
 
     Logger::println("Writing asm to: %s\n", spath.c_str());
-    std::error_code errinfo;
-    {
-      llvm::raw_fd_ostream out(spath.c_str(), errinfo, llvm::sys::fs::F_None);
-      if (!errinfo)
-      {
-        codegenModule(*gTargetMachine, *m, out,
-                      llvm::TargetMachine::CGFT_AssemblyFile);
-      } else {
-        error(Loc(), "cannot write asm: %s", errinfo.message().c_str());
-        fatal();
-      }
+    if (writeObj) {
+      // Clone module if we have both output-o and output-s flags
+      // to avoid running 'addPassesToEmitFile' passes twice on same module
+      auto clonedModule = llvm::CloneModule(
+#if LDC_LLVM_VER >= 700
+          *m
+#else
+          m
+#endif
+      );
+      codegenModule(*gTargetMachine, *clonedModule, spath.c_str(),
+                    llvm::TargetMachine::CGFT_AssemblyFile);
+    } else {
+      codegenModule(*gTargetMachine, *m, spath.c_str(),
+                    llvm::TargetMachine::CGFT_AssemblyFile);
     }
 
     if (assembleExternally) {
@@ -439,7 +457,7 @@ void writeModule(llvm::Module *m, const char *filename) {
     }
   }
 
-  if (outputObj && !emitBitcodeAsObjectFile) {
+  if (writeObj) {
     writeObjectFile(m, filename);
     if (useIR2ObjCache) {
       cache::cacheObjectFile(filename, moduleHash);

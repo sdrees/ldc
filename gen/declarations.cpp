@@ -7,14 +7,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "aggregate.h"
-#include "declaration.h"
-#include "enum.h"
-#include "id.h"
-#include "init.h"
-#include "nspace.h"
-#include "rmem.h"
-#include "template.h"
+#include "dmd/aggregate.h"
+#include "dmd/declaration.h"
+#include "dmd/enum.h"
+#include "dmd/errors.h"
+#include "dmd/expression.h"
+#include "dmd/id.h"
+#include "dmd/import.h"
+#include "dmd/init.h"
+#include "dmd/nspace.h"
+#include "dmd/root/rmem.h"
+#include "dmd/template.h"
+#include "driver/cl_options.h"
 #include "gen/classes.h"
 #include "gen/functions.h"
 #include "gen/irstate.h"
@@ -50,6 +54,15 @@ public:
 
   //////////////////////////////////////////////////////////////////////////
 
+  void visit(Import *im) override {
+    IF_LOG Logger::println("Import::codegen for %s", im->toPrettyChars());
+    LOG_SCOPE
+
+    irs->DBuilder.EmitImport(im);
+  }
+
+  //////////////////////////////////////////////////////////////////////////
+
   void visit(Nspace *ns) override {
     IF_LOG Logger::println("Nspace::codegen for %s", ns->toPrettyChars());
     LOG_SCOPE
@@ -74,7 +87,7 @@ public:
     }
 
     if (decl->type->ty == Terror) {
-      error(decl->loc, "had semantic errors when compiling");
+      decl->error("had semantic errors when compiling");
       decl->ir->setDefined();
       return;
     }
@@ -89,13 +102,9 @@ public:
       }
 
       // Emit TypeInfo.
-      DtoTypeInfoOf(decl->type, /*base=*/false);
-
-      // Declare __InterfaceZ.
       IrAggr *ir = getIrAggr(decl);
-      llvm::GlobalVariable *interfaceZ = ir->getClassInfoSymbol();
-      // Only define if not speculative.
-      if (!isSpeculativeType(decl->type)) {
+      if (!ir->suppressTypeInfo() && !isSpeculativeType(decl->type)) {
+        llvm::GlobalVariable *interfaceZ = ir->getClassInfoSymbol();
         defineGlobal(interfaceZ, ir->getClassInfoInit(), decl);
       }
     }
@@ -113,7 +122,7 @@ public:
     }
 
     if (decl->type->ty == Terror) {
-      error(decl->loc, "had semantic errors when compiling");
+      decl->error("had semantic errors when compiling");
       decl->ir->setDefined();
       return;
     }
@@ -132,28 +141,31 @@ public:
     // Skip __initZ and typeinfo for @compute device code.
     // TODO: support global variables and thus __initZ
     if (!irs->dcomputetarget) {
-      // Define the __initZ symbol.
       IrAggr *ir = getIrAggr(decl);
-      auto &initZ = ir->getInitSymbol();
-      auto initGlobal = llvm::cast<LLGlobalVariable>(initZ);
-      initZ = irs->setGlobalVarInitializer(initGlobal, ir->getDefaultInit());
-      setLinkage(decl, initGlobal);
+
+      // Define the __initZ symbol.
+      if (!decl->zeroInit) {
+        auto &initZ = ir->getInitSymbol();
+        auto initGlobal = llvm::cast<LLGlobalVariable>(initZ);
+        initZ = irs->setGlobalVarInitializer(initGlobal, ir->getDefaultInit());
+        setLinkageAndVisibility(decl, initGlobal);
+      }
 
       // emit typeinfo
-      if (global.params.useTypeInfo && Type::dtypeinfo) {
+      if (!ir->suppressTypeInfo()) {
         DtoTypeInfoOf(decl->type, /*base=*/false);
-      }
-    }
 
-    // Emit __xopEquals/__xopCmp/__xtoHash.
-    if (decl->xeq && decl->xeq != decl->xerreq) {
-      decl->xeq->accept(this);
-    }
-    if (decl->xcmp && decl->xcmp != decl->xerrcmp) {
-      decl->xcmp->accept(this);
-    }
-    if (decl->xhash) {
-      decl->xhash->accept(this);
+        // Emit __xopEquals/__xopCmp/__xtoHash.
+        if (decl->xeq && decl->xeq != decl->xerreq) {
+          decl->xeq->accept(this);
+        }
+        if (decl->xcmp && decl->xcmp != decl->xerrcmp) {
+          decl->xcmp->accept(this);
+        }
+        if (decl->xhash) {
+          decl->xhash->accept(this);
+        }
+      }
     }
   }
 
@@ -171,7 +183,7 @@ public:
     }
 
     if (decl->type->ty == Terror) {
-      error(decl->loc, "had semantic errors when compiling");
+      decl->error("had semantic errors when compiling");
       decl->ir->setDefined();
       return;
     }
@@ -189,15 +201,16 @@ public:
       auto &initZ = ir->getInitSymbol();
       auto initGlobal = llvm::cast<LLGlobalVariable>(initZ);
       initZ = irs->setGlobalVarInitializer(initGlobal, ir->getDefaultInit());
-      setLinkage(decl, initGlobal);
+      setLinkageAndVisibility(decl, initGlobal);
 
       llvm::GlobalVariable *vtbl = ir->getVtblSymbol();
       defineGlobal(vtbl, ir->getVtblInit(), decl);
 
       ir->defineInterfaceVtbls();
 
-      llvm::GlobalVariable *classZ = ir->getClassInfoSymbol();
-      if (!isSpeculativeType(decl->type)) {
+      // Emit TypeInfo.
+      if (!ir->suppressTypeInfo() && !isSpeculativeType(decl->type)) {
+        llvm::GlobalVariable *classZ = ir->getClassInfoSymbol();
         defineGlobal(classZ, ir->getClassInfoInit(), decl);
       }
     }
@@ -237,7 +250,7 @@ public:
     }
 
     if (decl->type->ty == Terror) {
-      error(decl->loc, "had semantic errors when compiling");
+      decl->error("had semantic errors when compiling");
       decl->ir->setDefined();
       return;
     }
@@ -294,6 +307,11 @@ public:
           gvar->setDLLStorageClass(LLGlobalValue::DLLExportStorageClass);
         }
 
+        // Hide non-exported symbols
+        if (opts::defaultToHiddenVisibility && !decl->isExport()) {
+          gvar->setVisibility(LLGlobalValue::HiddenVisibility);
+        }
+
         // Also set up the debug info.
         irs->DBuilder.EmitGlobalVariable(gvar, decl);
       }
@@ -316,7 +334,7 @@ public:
                            decl->toPrettyChars());
 
     if (decl->type->ty == Terror) {
-      error(decl->loc, "had semantic errors when compiling");
+      decl->error("had semantic errors when compiling");
       return;
     }
   }
@@ -366,6 +384,15 @@ public:
         Logger::println("Does not need codegen, skipping.");
         return;
       }
+
+      if (irs->dcomputetarget && (decl->tempdecl == Type::rtinfo ||
+                                  decl->tempdecl == Type::rtinfoImpl)) {
+        // Emitting object.RTInfo(Impl) template instantiations in dcompute
+        // modules would require dcompute support for global variables.
+        Logger::println("Skipping object.RTInfo(Impl) template instantiations "
+                        "in dcompute modules.");
+        return;
+      }
     }
 
     for (auto &m : *decl->members) {
@@ -406,16 +433,18 @@ public:
 
   //////////////////////////////////////////////////////////////////////////
 
+  static std::string getPragmaStringArg(PragmaDeclaration *decl) {
+    assert(decl->args && decl->args->dim == 1);
+    Expression *e = static_cast<Expression *>((*decl->args)[0]);
+    assert(e->op == TOKstring);
+    StringExp *se = static_cast<StringExp *>(e);
+    return std::string(se->toPtr(), se->numberOfCodeUnits());
+  }
+
   void visit(PragmaDeclaration *decl) override {
     if (decl->ident == Id::lib) {
-      assert(decl->args && decl->args->dim == 1);
       assert(!irs->dcomputetarget);
-        
-      Expression *e = static_cast<Expression *>(decl->args->data[0]);
-
-      assert(e->op == TOKstring);
-      StringExp *se = static_cast<StringExp *>(e);
-      const std::string name(se->toPtr(), se->numberOfCodeUnits());
+      const std::string name = getPragmaStringArg(decl);
       auto nameLen = name.size();
 
       if (global.params.targetTriple->isWindowsGNUEnvironment()) {
@@ -463,6 +492,14 @@ public:
         memcpy(arg + 2, name.data(), nameLen);
         arg[n - 1] = 0;
         global.params.linkswitches.push(arg);
+      }
+    } else if (decl->ident == Id::linkerDirective) {
+      if (global.params.targetTriple->isWindowsMSVCEnvironment()) {
+        // Embed directly as linker option in object file
+        const std::string directive = getPragmaStringArg(decl);
+        auto Value = llvm::MDString::get(gIR->context(), directive);
+        gIR->LinkerMetadataArgs.push_back(
+            llvm::MDNode::get(gIR->context(), Value));
       }
     }
     visit(static_cast<AttribDeclaration *>(decl));

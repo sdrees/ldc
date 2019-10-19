@@ -1,17 +1,12 @@
-/* Copyright (C) 2011-2018 by The D Language Foundation, All Rights Reserved
+/* Copyright (C) 2011-2019 by The D Language Foundation, All Rights Reserved
  * All Rights Reserved, written by Walter Bright
  * http://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
- * (See accompanying file LICENSE or copy at http://www.boost.org/LICENSE_1_0.txt)
- * https://github.com/dlang/dmd/blob/master/src/root/array.h
+ * http://www.boost.org/LICENSE_1_0.txt
+ * https://github.com/dlang/dmd/blob/master/src/dmd/root/array.h
  */
 
-#ifndef ARRAY_H
-#define ARRAY_H
-
-#if __DMC__
 #pragma once
-#endif
 
 #include <assert.h>
 #include <stdio.h>
@@ -151,29 +146,6 @@ struct Array
         memset(data,0,dim * sizeof(data[0]));
     }
 
-    void sort()
-    {
-        struct ArraySort
-        {
-            static int
-    #if _WIN32
-              __cdecl
-    #endif
-            Array_sort_compare(const void *x, const void *y)
-            {
-                RootObject *ox = *(RootObject **)const_cast<void *>(x);
-                RootObject *oy = *(RootObject **)const_cast<void *>(y);
-
-                return ox->compare(oy);
-            }
-        };
-
-        if (dim)
-        {
-            qsort(data, dim, sizeof(RootObject *), &ArraySort::Array_sort_compare);
-        }
-    }
-
     TYPE *tdata()
     {
         return data;
@@ -285,22 +257,22 @@ struct Array
         return *this;
     }
 
-    size_type size()
+    size_type size() const
     {
         return static_cast<size_type>(dim);
     }
 
-    bool empty()
+    bool empty() const
     {
         return dim == 0;
     }
 
-    TYPE front()
+    TYPE front() const
     {
         return data[0];
     }
 
-    TYPE back()
+    TYPE back() const
     {
         return data[dim-1];
     }
@@ -316,27 +288,19 @@ struct Array
     }
 
     typedef TYPE *iterator;
+    typedef const TYPE *const_iterator;
     typedef std::reverse_iterator<iterator> reverse_iterator;
+    typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
-    iterator begin()
-    {
-        return static_cast<iterator>(&data[0]);
-    }
+    iterator begin() { return static_cast<iterator>(&data[0]); }
+    iterator end() { return static_cast<iterator>(&data[dim]); }
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
 
-    iterator end()
-    {
-        return static_cast<iterator>(&data[dim]);
-    }
-
-    reverse_iterator rbegin()
-    {
-        return reverse_iterator(end());
-    }
-
-    reverse_iterator rend()
-    {
-        return reverse_iterator(begin());
-    }
+    const_iterator begin() const { return static_cast<const_iterator>(&data[0]); }
+    const_iterator end() const { return static_cast<const_iterator>(&data[dim]); }
+    const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
 
     iterator erase(iterator pos)
     {
@@ -365,5 +329,3 @@ struct BitArray
 private:
     BitArray(const BitArray&);
 };
-
-#endif
