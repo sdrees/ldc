@@ -1934,7 +1934,7 @@ Expression castTo(Expression e, Scope* sc, Type t)
                         else
                             buffer.writeUTF16(c);
                     }
-                    newlen = buffer.offset / 2;
+                    newlen = buffer.length / 2;
                     buffer.writeUTF16(0);
                     goto L1;
 
@@ -1961,7 +1961,7 @@ Expression castTo(Expression e, Scope* sc, Type t)
                         else
                             buffer.writeUTF8(c);
                     }
-                    newlen = buffer.offset;
+                    newlen = buffer.length;
                     buffer.writeUTF8(0);
                     goto L1;
 
@@ -1988,7 +1988,7 @@ Expression castTo(Expression e, Scope* sc, Type t)
                             buffer.writeUTF8(c);
                         newlen++;
                     }
-                    newlen = buffer.offset;
+                    newlen = buffer.length;
                     buffer.writeUTF8(0);
                     goto L1;
 
@@ -2002,7 +2002,7 @@ Expression castTo(Expression e, Scope* sc, Type t)
                             buffer.writeUTF16(c);
                         newlen++;
                     }
-                    newlen = buffer.offset / 2;
+                    newlen = buffer.length / 2;
                     buffer.writeUTF16(0);
                     goto L1;
 
@@ -2012,7 +2012,7 @@ Expression castTo(Expression e, Scope* sc, Type t)
                         se = cast(StringExp)e.copy();
                         copied = 1;
                     }
-                    se.string = buffer.extractData();
+                    se.string = buffer.extractSlice().ptr;   // already 0 terminated
                     se.len = newlen;
 
                     {
@@ -3401,14 +3401,19 @@ LmodCompare:
             if (t1.nextOf().implicitConvTo(t2.nextOf()))
             {
                 // (cast(T)U)[] op T[]  (https://issues.dlang.org/show_bug.cgi?id=12780)
-                // e1 is left as U[], it will be handled in arrayOp() later.
                 t = t2.nextOf().arrayOf();
+                // if cast won't be handled in arrayOp() later
+                if (!isArrayOpImplicitCast(t1.isTypeDArray(), t2.isTypeDArray()))
+                    e1 = e1.castTo(sc, t);
             }
             else if (t2.nextOf().implicitConvTo(t1.nextOf()))
             {
                 // T[] op (cast(T)U)[]  (https://issues.dlang.org/show_bug.cgi?id=12780)
                 // e2 is left as U[], it will be handled in arrayOp() later.
                 t = t1.nextOf().arrayOf();
+                // if cast won't be handled in arrayOp() later
+                if (!isArrayOpImplicitCast(t2.isTypeDArray(), t1.isTypeDArray()))
+                    e2 = e2.castTo(sc, t);
             }
             else
                 return Lincompatible();
