@@ -48,6 +48,19 @@ foreach(LLVM_SUPPORTED_TARGET ${LLVM_TARGETS_TO_BUILD})
     add_definitions("-DLDC_LLVM_SUPPORTED_TARGET_${LLVM_SUPPORTED_TARGET}=1")
 endforeach()
 
+# Set MLIR support variables if it is found. Only try for LLVM >= 10.0.
+if(NOT (LDC_LLVM_VER LESS 1000))
+    include(FindMLIR)
+    message(STATUS "Building LDC with MLIR support: ${MLIR_FOUND}")
+    if(MLIR_FOUND)
+        message(STATUS "Using MLIR installation directory: ${MLIR_ROOT_DIR}")
+        include_directories(${MLIR_INCLUDE_DIR})
+        add_definitions("-DLDC_MLIR_ENABLED")
+
+        set(LLVM_LIBRARIES "${MLIR_LIBRARIES}" ${LLVM_LIBRARIES})
+    endif() #if MLIR_FOUND
+endif()
+
 # Check and adapt for LLVMSPIRVLib (Khronos SPIRV-LLVM-Translator)
 set(LLVM_SPIRV_FOUND OFF)
 if(MSVC)
@@ -348,27 +361,6 @@ endif()
 message(STATUS "LDC version identifier: ${LDC_VERSION}")
 configure_file(driver/ldc-version.cpp.in driver/ldc-version.cpp)
 
-#
-# Setting MLIR headers
-#
-
-find_package(MLIR)
-if(MLIR_FOUND)
-    message(STATUS "Buiding with MLIR support")
-    include_directories(${MLIR_ROOT_DIR})
-    include_directories(${MLIR_INCLUDE_DIRS})
-    include_directories(${MLIR_BUILD_INCLUDE_DIRS})
-    include_directories(${MLIR_LIB_DIRS})
-    add_definitions("-DLDC_MLIR_ENABLED")
-
-    set(LLVM_LINK_COMPONENTS
-        Support
-    )
-
-set(LLVM_LIBRARIES "${MLIR_LIBRARIES}" ${LLVM_LIBRARIES})
-
-endif() #if MLIR_FOUND
-
 # Also add the header files to the build so that they are available in IDE
 # project files generated via CMake.
 file(GLOB_RECURSE FE_SRC_D dmd/*.d)
@@ -458,17 +450,19 @@ include(HandleLTOPGOBuildOptions)
 #
 # Enable Dynamic compilation if supported for this platform and LLVM version.
 #
-set(LDC_DYNAMIC_COMPILE "AUTO" CACHE STRING "Support dynamic compilation (True|False). Enabled by default.")
+set(LDC_DYNAMIC_COMPILE "AUTO" CACHE STRING "Support dynamic compilation (ON|OFF). Enabled by default.")
 option(LDC_DYNAMIC_COMPILE_USE_CUSTOM_PASSES "Use custom LDC passes in jit" ON)
 if(LDC_DYNAMIC_COMPILE STREQUAL "AUTO")
-    set(LDC_DYNAMIC_COMPILE False)  # must be a valid Python boolean constant (case sensitive)
+    set(LDC_DYNAMIC_COMPILE OFF)
     if (NOT (LDC_LLVM_VER LESS 500))
-        set(LDC_DYNAMIC_COMPILE True)
-        add_definitions(-DLDC_DYNAMIC_COMPILE)
-        add_definitions(-DLDC_DYNAMIC_COMPILE_API_VERSION=3)
+        set(LDC_DYNAMIC_COMPILE ON)
     endif()
 endif()
 message(STATUS "Building LDC with dynamic compilation support: ${LDC_DYNAMIC_COMPILE} (LDC_DYNAMIC_COMPILE=${LDC_DYNAMIC_COMPILE})")
+if(LDC_DYNAMIC_COMPILE)
+    add_definitions(-DLDC_DYNAMIC_COMPILE)
+    add_definitions(-DLDC_DYNAMIC_COMPILE_API_VERSION=3)
+endif()
 
 #
 # Includes, defines.
