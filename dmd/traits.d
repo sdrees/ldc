@@ -1,6 +1,7 @@
 /**
- * Compiler implementation of the
- * $(LINK2 http://www.dlang.org, D programming language).
+ * Handle introspection functionality of the `__traits()` construct.
+ *
+ * Specification: $(LINK2 https://dlang.org/spec/traits.html, Traits)
  *
  * Copyright:   Copyright (C) 1999-2020 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
@@ -1573,6 +1574,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                         err = true;
                         break;
                     }
+                    const olderrors = global.errors;
                     const len = buf.length;
                     buf.writeByte(0);
                     const str = buf.extractSlice()[0 .. len];
@@ -1581,7 +1583,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                     //printf("p.loc.linnum = %d\n", p.loc.linnum);
 
                     o = p.parseTypeOrAssignExp(TOK.endOfFile);
-                    if (errors != global.errors || p.token.value != TOK.endOfFile)
+                    if (olderrors != global.errors || p.token.value != TOK.endOfFile)
                     {
                         err = true;
                         break;

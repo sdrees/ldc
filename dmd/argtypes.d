@@ -1,6 +1,5 @@
 /**
- * Compiler implementation of the
- * $(LINK2 http://www.dlang.org, D programming language).
+ * Break down a D type into basic (register) types for the Itanium C++ ABI.
  *
  * Copyright:   Copyright (C) 1999-2020 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 http://www.digitalmars.com, Walter Bright)
@@ -56,7 +55,7 @@ extern (C++) TypeTuple toArgTypes(Type t)
         void memory()
         {
             //printf("\ttoArgTypes() %s => [ ]\n", t.toChars());
-            result = new TypeTuple(); // pass on the stack
+            result = TypeTuple.empty; // pass on the stack
         }
 
         ///

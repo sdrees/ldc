@@ -25,7 +25,6 @@ public:
     Dsymbols *decl;     // array of Dsymbol's
 
     virtual Dsymbols *include(Scope *sc);
-    int apply(Dsymbol_apply_ft_t fp, void *param);
     virtual Scope *newScope(Scope *sc);
     void addMember(Scope *sc, ScopeDsymbol *sds);
     void setScope(Scope *sc);
@@ -88,6 +87,7 @@ public:
 
     Dsymbol *syntaxCopy(Dsymbol *s);
     Scope *newScope(Scope *sc);
+    void setScope(Scope *sc);
     const char *toChars() const;
     void accept(Visitor *v) { v->visit(this); }
 };
