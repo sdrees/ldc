@@ -10,6 +10,7 @@
 #include "gen/nested.h"
 
 #include "dmd/errors.h"
+#include "dmd/ldcbindings.h"
 #include "dmd/target.h"
 #include "gen/dvalue.h"
 #include "gen/funcgenstate.h"
@@ -170,9 +171,6 @@ DValue *DtoNestedVariable(Loc &loc, Type *astype, VarDeclaration *vd,
   }
 
   if (!skipDIDeclaration && global.params.symdebug) {
-#if LDC_LLVM_VER < 500
-    gIR->DBuilder.OpDeref(dwarfAddrOps);
-#endif
     gIR->DBuilder.EmitLocalVariable(ctx, vd, nullptr, false,
                                     /*forceAsLocal=*/true, false, dwarfAddrOps);
   }
@@ -391,21 +389,21 @@ static void DtoCreateNestedContextType(FuncDeclaration *fd) {
       builder.alignCurrentOffset(alignment);
     }
 
-    IrLocal &irLocal = *getIrLocal(vd, true);
+    const bool isParam = vd->isParameter();
+
+    IrLocal &irLocal =
+        *(isParam ? getIrParameter(vd, true) : getIrLocal(vd, true));
     irLocal.nestedIndex = builder.currentFieldIndex();
     irLocal.nestedDepth = depth;
 
     LLType *t = nullptr;
     if (vd->isRef() || vd->isOut()) {
       t = DtoType(vd->type->pointerTo());
-    } else if (vd->isParameter() && (vd->storage_class & STClazy)) {
-      // The LL type is a delegate (LL struct).
-      // Depending on the used TargetABI, the LL parameter is either a struct or
-      // a pointer to a struct (`byval` attribute, IndirectByvalRewrite).
-      t = getIrParameter(vd)->value->getType();
-      if (t->isPointerTy())
-        t = t->getPointerElementType();
-      assert(t->isStructTy());
+    } else if (isParam && (vd->storage_class & STClazy)) {
+      // the type is a delegate (LL struct)
+      Type *dt = TypeFunction::create(nullptr, vd->type, VARARGnone, LINKd);
+      dt = createTypeDelegate(dt);
+      t = DtoType(dt);
     } else {
       t = DtoMemType(vd->type);
     }
@@ -502,7 +500,8 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
         assert(parm->value->getType()->isPointerTy());
 
         if (vd->isRef() || vd->isOut()) {
-          Logger::println("Captured by reference, copying pointer to nested frame");
+          Logger::println(
+              "Captured by reference, copying pointer to nested frame");
           DtoAlignedStore(parm->value, gep);
           // pass GEP as reference lvalue to EmitLocalVariable()
         } else {
@@ -522,11 +521,6 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
 
       if (global.params.symdebug) {
         LLSmallVector<int64_t, 1> dwarfAddrOps;
-#if LDC_LLVM_VER < 500
-        // Because we are passing a GEP instead of an alloca to
-        // llvm.dbg.declare, we have to make the address dereference explicit.
-        gIR->DBuilder.OpDeref(dwarfAddrOps);
-#endif
         gIR->DBuilder.EmitLocalVariable(gep, vd, nullptr, false, false, false,
                                         dwarfAddrOps);
       }

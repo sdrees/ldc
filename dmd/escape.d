@@ -25,6 +25,7 @@ import dmd.errors;
 import dmd.expression;
 import dmd.func;
 import dmd.globals;
+import dmd.id;
 import dmd.identifier;
 import dmd.init;
 import dmd.mtype;
@@ -405,7 +406,7 @@ bool checkParamArgumentEscape(Scope* sc, FuncDeclaration fdc, Parameter par, Exp
 
     foreach (Expression ee; er.byexp)
     {
-        if (sc.func.setUnsafe())
+        if (sc.func && sc.func.setUnsafe())
         {
             if (!gag)
                 error(ee.loc, "reference to stack allocated value returned by `%s` assigned to non-scope parameter `%s`",
@@ -886,6 +887,28 @@ ByRef:
                 deprecation(ee.loc, "slice of static array temporary returned by `%s` assigned to longer lived variable `%s`",
                     ee.toChars(), va.toChars());
             //result = true;
+            continue;
+        }
+
+        if (va && ee.op == TOK.call && ee.type.toBasetype().ty == Tstruct &&
+            !(va.storage_class & STC.temp) && va.ident != Id.withSym &&
+            sc.func.setUnsafe())
+        {
+            if (!gag)
+                error(ee.loc, "address of struct temporary returned by `%s` assigned to longer lived variable `%s`",
+                    ee.toChars(), va.toChars());
+            result = true;
+            continue;
+        }
+
+        if (va && ee.op == TOK.structLiteral &&
+            !(va.storage_class & STC.temp) && va.ident != Id.withSym &&
+            sc.func.setUnsafe())
+        {
+            if (!gag)
+                error(ee.loc, "address of struct literal `%s` assigned to longer lived variable `%s`",
+                    ee.toChars(), va.toChars());
+            result = true;
             continue;
         }
 

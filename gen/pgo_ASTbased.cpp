@@ -37,7 +37,7 @@
 namespace {
 llvm::cl::opt<bool, false, opts::FlagParser<bool>> enablePGOIndirectCalls(
     "pgo-indirect-calls", llvm::cl::ZeroOrMore, llvm::cl::Hidden,
-    llvm::cl::desc("(*) Enable PGO of indirect calls (LLVM >= 3.9)"),
+    llvm::cl::desc("(*) Enable PGO of indirect calls"),
     llvm::cl::init(true));
 }
 
@@ -141,12 +141,7 @@ public:
     // Finalize the MD5 and return the hash.
     llvm::MD5::MD5Result Result;
     MD5.final(Result);
-#if LDC_LLVM_VER >= 500
     return Result.low();
-#else
-    using namespace llvm::support;
-    return endian::read<uint64_t, little, unaligned>(Result);
-#endif
   }
 };
 
@@ -773,7 +768,7 @@ void CodeGenPGO::setFuncName(llvm::StringRef Name,
     // If Linkage is private, and the function is in a comdat "any" group, set
     // the linkage to internal to prevent LLVM from erroring with "comdat global
     // value has private linkage".
-    if (supportsCOMDAT() &&
+    if (needsCOMDAT() &&
         FuncNameVar->getLinkage() == llvm::GlobalValue::PrivateLinkage) {
       FuncNameVar->setLinkage(llvm::GlobalValue::InternalLinkage);
     }

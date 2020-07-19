@@ -550,6 +550,8 @@ version (IN_LLVM)
             objExt = global.ll_ext;
         else if (global.params.output_s)
             objExt = global.s_ext;
+        else if (global.params.output_mlir)
+            objExt = global.mlir_ext;
 
         if (objExt)
             objfile = setOutfilename(global.params.objname, global.params.objdir, filename, objExt);
@@ -812,7 +814,7 @@ else
 
             if (buf.length & 3)
             {
-                error("odd length of UTF-32 char source %u", buf.length);
+                error("odd length of UTF-32 char source %llu", cast(ulong) buf.length);
                 fatal();
             }
 
@@ -858,7 +860,7 @@ else
 
             if (buf.length & 1)
             {
-                error("odd length of UTF-16 char source %u", buf.length);
+                error("odd length of UTF-16 char source %llu", cast(ulong) buf.length);
                 fatal();
             }
 
@@ -1489,17 +1491,6 @@ else
     }
 
     // Back end
-    int doppelganger; // sub-module
-    Symbol* cov; // private uint[] __coverage;
-    uint* covb; // bit array of valid code line numbers
-    Symbol* sictor; // module order independent constructor
-    Symbol* sctor; // module constructor
-    Symbol* sdtor; // module destructor
-    Symbol* ssharedctor; // module shared constructor
-    Symbol* sshareddtor; // module shared destructor
-    Symbol* stest; // module unit test
-    Symbol* sfilename; // symbol for filename
-
 version (IN_LLVM)
 {
     //llvm::Module* genLLVMModule(llvm::LLVMContext& context);
@@ -1513,6 +1504,19 @@ version (IN_LLVM)
     void* d_cover_valid;  // llvm::GlobalVariable* --> private immutable size_t[] _d_cover_valid;
     void* d_cover_data;   // llvm::GlobalVariable* --> private uint[] _d_cover_data;
     Array!size_t d_cover_valid_init; // initializer for _d_cover_valid
+}
+else
+{
+    int doppelganger; // sub-module
+    Symbol* cov; // private uint[] __coverage;
+    uint* covb; // bit array of valid code line numbers
+    Symbol* sictor; // module order independent constructor
+    Symbol* sctor; // module constructor
+    Symbol* sdtor; // module destructor
+    Symbol* ssharedctor; // module shared constructor
+    Symbol* sshareddtor; // module shared destructor
+    Symbol* stest; // module unit test
+    Symbol* sfilename; // symbol for filename
 }
 
     override inout(Module) isModule() inout

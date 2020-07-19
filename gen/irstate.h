@@ -122,6 +122,13 @@ private:
   // enough to use it directly.]
   llvm::DenseMap<void *, llvm::Constant *> structLiteralConstants;
 
+  // Global variables bound to string literals. Once created such a variable
+  // is reused whenever an equivalent string literal is referenced in the
+  // module, to prevent duplicates.
+  llvm::StringMap<llvm::GlobalVariable *> cachedStringLiterals;
+  llvm::StringMap<llvm::GlobalVariable *> cachedWstringLiterals;
+  llvm::StringMap<llvm::GlobalVariable *> cachedDstringLiterals;
+
 public:
   IRState(const char *name, llvm::LLVMContext &context);
   ~IRState();
@@ -207,14 +214,6 @@ public:
   /// Whether to emit array bounds checking in the current function.
   bool emitArrayBoundsChecks();
 
-  // Global variables bound to string literals.  Once created such a
-  // variable is reused whenever the same string literal is
-  // referenced in the module.  Caching them per module prevents the
-  // duplication of identical literals.
-  llvm::StringMap<llvm::GlobalVariable *> stringLiteral1ByteCache;
-  llvm::StringMap<llvm::GlobalVariable *> stringLiteral2ByteCache;
-  llvm::StringMap<llvm::GlobalVariable *> stringLiteral4ByteCache;
-
   // Sets the initializer for a global LL variable.
   // If the types don't match, this entails creating a new helper global
   // matching the initializer type and replacing all existing uses of globalVar
@@ -234,6 +233,12 @@ public:
   void setStructLiteralConstant(StructLiteralExp *sle,
                                 llvm::Constant *constant);
 
+  // Constructs a global variable for a StringExp.
+  // Caches the result based on StringExp::peekData() such that any subsequent
+  // calls with a StringExp with matching data will return the same variable.
+  llvm::GlobalVariable *getCachedStringLiteral(StringExp *se);
+  llvm::GlobalVariable *getCachedStringLiteral(llvm::StringRef s);
+
   // List of functions with cpu or features attributes overriden by user
   std::vector<IrFunction *> targetCpuOrFeaturesOverridden;
 
@@ -246,13 +251,8 @@ public:
   std::set<IrGlobal *> dynamicCompiledVars;
 
 /// Vector of options passed to the linker as metadata in object file.
-#if LDC_LLVM_VER >= 500
   llvm::SmallVector<llvm::MDNode *, 5> linkerOptions;
   llvm::SmallVector<llvm::MDNode *, 5> linkerDependentLibs;
-#else
-  llvm::SmallVector<llvm::Metadata *, 5> linkerOptions;
-  llvm::SmallVector<llvm::Metadata *, 5> linkerDependentLibs;
-#endif
 
   void addLinkerOption(llvm::ArrayRef<llvm::StringRef> options);
   void addLinkerDependentLib(llvm::StringRef libraryName);

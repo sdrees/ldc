@@ -383,31 +383,9 @@ public:
 
     Type *dtype = e->type->toBasetype();
     Type *cty = dtype->nextOf()->toBasetype();
-
     LLType *ct = DtoMemType(cty);
 
-    llvm::StringMap<llvm::GlobalVariable *> *stringLiteralCache =
-        stringLiteralCacheForType(cty);
-    LLConstant *_init = buildStringLiteralConstant(e, true);
-    const auto at = _init->getType();
-
-    llvm::StringRef key(e->toChars());
-    llvm::GlobalVariable *gvar =
-        (stringLiteralCache->find(key) == stringLiteralCache->end())
-            ? nullptr
-            : (*stringLiteralCache)[key];
-    if (gvar == nullptr) {
-      llvm::GlobalValue::LinkageTypes _linkage =
-          llvm::GlobalValue::PrivateLinkage;
-      IF_LOG {
-        Logger::cout() << "type: " << *at << '\n';
-        Logger::cout() << "init: " << *_init << '\n';
-      }
-      gvar = new llvm::GlobalVariable(gIR->module, at, true, _linkage, _init,
-                                      ".str");
-      gvar->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-      (*stringLiteralCache)[key] = gvar;
-    }
+    llvm::GlobalVariable *gvar = p->getCachedStringLiteral(e);
 
     llvm::ConstantInt *zero =
         LLConstantInt::get(LLType::getInt32Ty(gIR->context()), 0, false);
@@ -732,7 +710,6 @@ public:
       assert(dve);
       FuncDeclaration *fdecl = dve->var->isFuncDeclaration();
       assert(fdecl);
-      DtoDeclareFunction(fdecl);
       Expression *thisExp = dve->e1;
       LLValue *thisArg = thisExp->type->toBasetype()->ty == Tclass
                              ? DtoRVal(thisExp)
@@ -890,7 +867,6 @@ public:
       // Logger::println("FuncDeclaration");
       FuncDeclaration *fd = fv->func;
       assert(fd);
-      DtoResolveFunction(fd);
       result = new DFuncValue(fd, DtoCallee(fd));
       return;
     }
@@ -984,8 +960,6 @@ public:
       // Logger::cout() << "mem: " << *arrptr << '\n';
       result = new DLValue(e->type, DtoBitCast(arrptr, DtoPtrToType(e->type)));
     } else if (FuncDeclaration *fdecl = e->var->isFuncDeclaration()) {
-      DtoResolveFunction(fdecl);
-
       // This is a bit more convoluted than it would need to be, because it
       // has to take templated interface methods into account, for which
       // isFinalFunc is not necessarily true.
@@ -998,6 +972,7 @@ public:
       // Get the actual function value to call.
       LLValue *funcval = nullptr;
       if (nonFinal) {
+        DtoResolveFunction(fdecl);
         funcval = DtoVirtualFunctionPointer(l, fdecl, e->toChars());
       } else {
         funcval = DtoCallee(fdecl);
@@ -1507,7 +1482,6 @@ public:
       LLValue *mem = nullptr;
       if (e->allocator) {
         // custom allocator
-        DtoResolveFunction(e->allocator);
         DFuncValue dfn(e->allocator, DtoCallee(e->allocator));
         DValue *res = DtoCallFunction(e->loc, nullptr, &dfn, e->newargs);
         mem = DtoBitCast(DtoRVal(res), DtoType(ntype->pointerTo()),
@@ -1536,7 +1510,6 @@ public:
 
           IF_LOG Logger::println("Calling constructor");
           assert(e->arguments != NULL);
-          DtoResolveFunction(e->member);
           DFuncValue dfn(e->member, DtoCallee(e->member), mem);
           DtoCallFunction(e->loc, ts, &dfn, e->arguments);
         }
@@ -1684,19 +1657,25 @@ public:
     // failed: call assert runtime function
     p->scope() = IRScope(failedbb);
 
-    /* DMD Bugzilla 8360: If the condition is evaluated to true,
-     * msg is not evaluated at all. So should use toElemDtor()
-     * instead of toElem().
-     */
-    DValue *const msg = e->msg ? toElemDtor(e->msg) : nullptr;
-    Module *const module = p->func()->decl->getModule();
-    if (global.params.checkAction == CHECKACTION_C) {
-      const auto cMsg =
-          msg ? DtoArrayPtr(msg) // assuming `msg` is null-terminated, like DMD
-              : DtoConstCString(e->e1->toChars());
-      DtoCAssert(module, e->e1->loc, cMsg);
+    if (global.params.checkAction == CHECKACTION_halt) {
+      p->ir->CreateCall(GET_INTRINSIC_DECL(trap), {});
+      p->ir->CreateUnreachable();
     } else {
-      DtoAssert(module, e->loc, msg);
+      /* DMD Bugzilla 8360: If the condition is evaluated to true,
+       * msg is not evaluated at all. So should use toElemDtor()
+       * instead of toElem().
+       */
+      DValue *msg = e->msg ? toElemDtor(e->msg) : nullptr;
+      Module *module = p->func()->decl->getModule();
+      if (global.params.checkAction == CHECKACTION_C) {
+        LLValue *cMsg =
+            msg ? DtoArrayPtr(
+                      msg) // assuming `msg` is null-terminated, like DMD
+                : DtoConstCString(e->e1->toChars());
+        DtoCAssert(module, e->e1->loc, cMsg);
+      } else {
+        DtoAssert(module, e->loc, msg);
+      }
     }
 
     // passed:
@@ -1705,8 +1684,8 @@ public:
     // class/struct invariants
     if (global.params.useInvariants != CHECKENABLEon)
       return;
-    if (condty->ty == Tclass) {
-      const auto sym = static_cast<TypeClass *>(condty)->sym;
+    if (auto tc = condty->isTypeClass()) {
+      const auto sym = tc->sym;
       if (sym->isInterfaceDeclaration() || sym->isCPPclass())
         return;
 
@@ -1728,7 +1707,6 @@ public:
 
       Logger::print("calling struct invariant");
 
-      DtoResolveFunction(invDecl);
       DFuncValue invFunc(invDecl, DtoCallee(invDecl), DtoRVal(cond));
       DtoCallFunction(e->loc, nullptr, &invFunc, nullptr);
     }
@@ -2168,7 +2146,7 @@ public:
       DtoDeclareFunction(fd);
       assert(!fd->isNested());
     }
-    assert(DtoCallee(fd));
+    assert(DtoCallee(fd, false));
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -2182,6 +2160,7 @@ public:
     assert(fd);
 
     genFuncLiteral(fd, e);
+    LLFunction *callee = DtoCallee(fd, false);
 
     if (fd->isNested()) {
       LLType *dgty = DtoType(e->type);
@@ -2211,12 +2190,12 @@ public:
       }
       cval = DtoBitCast(cval, dgty->getContainedType(0));
 
-      LLValue *castfptr = DtoBitCast(DtoCallee(fd), dgty->getContainedType(1));
+      LLValue *castfptr = DtoBitCast(callee, dgty->getContainedType(1));
 
       result = new DImValue(e->type, DtoAggrPair(cval, castfptr, ".func"));
 
     } else {
-      result = new DFuncValue(e->type, fd, DtoCallee(fd));
+      result = new DFuncValue(e->type, fd, callee);
     }
   }
 
@@ -2593,8 +2572,8 @@ public:
   //////////////////////////////////////////////////////////////////////////////
 
   static DLValue *emitVector(VectorExp *e, LLValue *dstMem) {
-    TypeVector *type = static_cast<TypeVector *>(e->to->toBasetype());
-    assert(e->type->ty == Tvector);
+    TypeVector *type = e->to->toBasetype()->isTypeVector();
+    assert(type);
 
     const unsigned N = e->dim;
 
@@ -2602,9 +2581,15 @@ public:
     if (elementType->ty == Tvoid)
       elementType = Type::tuns8;
 
-    // Array literals are assigned element-wise, other expressions are cast and
-    // splat across the vector elements. This is what DMD does.
+    const auto getCastElement = [e, elementType](DValue *element) {
+      return DtoRVal(DtoCast(e->loc, element, elementType));
+    };
+
+    Type *tsrc = e->e1->type->toBasetype();
     if (auto lit = e->e1->isArrayLiteralExp()) {
+      // Optimization for array literals: check for a fully static literal and
+      // store a vector constant in that case, otherwise emplace element-wise
+      // into destination memory.
       Logger::println("array literal expression");
       assert(lit->elements->length == N &&
              "Array literal vector initializer "
@@ -2616,7 +2601,7 @@ public:
       llElementConstants.reserve(N);
       for (unsigned i = 0; i < N; ++i) {
         DValue *val = toElem(indexArrayLiteral(lit, i));
-        LLValue *llVal = DtoRVal(DtoCast(e->loc, val, elementType));
+        LLValue *llVal = getCastElement(val);
         llElements.push_back(llVal);
         if (auto llConstant = isaConstant(llVal))
           llElementConstants.push_back(llConstant);
@@ -2630,10 +2615,36 @@ public:
           DtoStore(llElements[i], DtoGEP(dstMem, 0, i));
         }
       }
+    } else if (tsrc->ty == Tarray || tsrc->ty == Tsarray) {
+      // Arrays: prefer a memcpy if the LL element types match, otherwise cast
+      // and store element-wise.
+      if (auto ts = tsrc->isTypeSArray()) {
+        Logger::println("static array expression");
+        assert(ts->dim->toInteger() == N &&
+               "Static array vector initializer length mismatch, should have "
+               "been handled in frontend.");
+      } else {
+        // TODO: bounds check?
+        Logger::println("dynamic array expression, assume matching length");
+      }
+
+      LLValue *arrayPtr = DtoArrayPtr(toElem(e->e1));
+      Type *srcElementType = tsrc->nextOf();
+
+      if (DtoMemType(elementType) == DtoMemType(srcElementType)) {
+        DtoMemCpy(dstMem, arrayPtr);
+      } else {
+        for (unsigned i = 0; i < N; ++i) {
+          DLValue srcElement(srcElementType, DtoGEP1(arrayPtr, i));
+          LLValue *llVal = getCastElement(&srcElement);
+          DtoStore(llVal, DtoGEP(dstMem, 0, i));
+        }
+      }
     } else {
+      // Try a splat vector constant, otherwise store element-wise.
       Logger::println("normal (splat) expression");
       DValue *val = toElem(e->e1);
-      LLValue *llElement = DtoRVal(DtoCast(e->loc, val, elementType));
+      LLValue *llElement = getCastElement(val);
       if (auto llConstant = isaConstant(llElement)) {
         auto vectorConstant = llvm::ConstantVector::getSplat(N, llConstant);
         DtoStore(vectorConstant, dstMem);
@@ -2824,7 +2835,6 @@ bool toInPlaceConstruction(DLValue *lhs, Expression *rhs) {
           auto lval = DtoLVal(lhs);
           ToElemVisitor::emitStructLiteral(sle, lval);
           // ... and invoke the ctor directly on it
-          DtoDeclareFunction(fd);
           auto fnval = new DFuncValue(fd, DtoCallee(fd), lval);
           DtoCallFunction(ce->loc, ce->type, fnval, ce->arguments);
           return true;
@@ -2886,14 +2896,3 @@ bool toInPlaceConstruction(DLValue *lhs, Expression *rhs) {
 
   return false;
 }
-
-////////////////////////////////////////////////////////////////////////////////
-
-// FIXME: Implement & place in right module
-Symbol *toModuleAssert(Module *m) { return nullptr; }
-
-// FIXME: Implement & place in right module
-Symbol *toModuleUnittest(Module *m) { return nullptr; }
-
-// FIXME: Implement & place in right module
-Symbol *toModuleArray(Module *m) { return nullptr; }

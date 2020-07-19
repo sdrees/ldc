@@ -52,6 +52,7 @@ extern cl::opt<std::string> objectDir;
 extern cl::opt<std::string> soname;
 extern cl::opt<bool> output_bc;
 extern cl::opt<bool> output_ll;
+extern cl::opt<bool> output_mlir;
 extern cl::opt<bool> output_s;
 extern cl::opt<cl::boolOrDefault> output_o;
 extern cl::opt<std::string> ddocDir;
@@ -82,6 +83,7 @@ extern FloatABI::Type floatABI;
 extern cl::opt<bool> linkonceTemplates;
 extern cl::opt<bool> disableLinkerStripDead;
 extern cl::opt<unsigned char> defaultToHiddenVisibility;
+extern cl::opt<bool> noPLT;
 
 // Math options
 extern bool fFastMath;
@@ -105,9 +107,7 @@ extern cl::opt<LTOKind> ltoMode;
 inline bool isUsingLTO() { return ltoMode != LTO_None; }
 inline bool isUsingThinLTO() { return ltoMode == LTO_Thin; }
 
-#if LDC_LLVM_VER >= 400
 extern cl::opt<std::string> saveOptimizationRecord;
-#endif
 #if LDC_LLVM_SUPPORTED_TARGET_SPIRV || LDC_LLVM_SUPPORTED_TARGET_NVPTX
 extern cl::list<std::string> dcomputeTargets;
 extern cl::opt<std::string> dcomputeFilePrefix;

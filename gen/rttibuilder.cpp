@@ -31,8 +31,8 @@ RTTIBuilder::RTTIBuilder(Type *baseType) {
 
   DtoResolveDsymbol(ad);
 
-  if (ad->isClassDeclaration()) {
-    const auto baseir = getIrAggr(ad);
+  if (auto cd = ad->isClassDeclaration()) {
+    const auto baseir = getIrAggr(cd);
     assert(baseir && "no IrAggr for TypeInfo base class");
 
     // just start with adding the vtbl
@@ -85,7 +85,7 @@ void RTTIBuilder::push_void_array(llvm::Constant *CI, Type *valtype,
   mangleToBuffer(mangle_sym, &initname);
   initname.writestring(".rtti.voidarr.data");
 
-  const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, supportsCOMDAT());
+  const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, needsCOMDAT());
 
   auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
                                 initname.peekChars());
@@ -111,7 +111,7 @@ void RTTIBuilder::push_array(llvm::Constant *CI, uint64_t dim, Type *valtype,
   initname.writestring(tmpStr.c_str());
   initname.writestring(".data");
 
-  const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, supportsCOMDAT());
+  const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, needsCOMDAT());
 
   auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
                                 initname.peekChars());
@@ -135,7 +135,6 @@ void RTTIBuilder::push_size_as_vp(uint64_t s) {
 
 void RTTIBuilder::push_funcptr(FuncDeclaration *fd, Type *castto) {
   if (fd) {
-    DtoResolveFunction(fd);
     LLConstant *F = DtoCallee(fd);
     if (castto) {
       F = DtoBitCast(F, DtoType(castto));

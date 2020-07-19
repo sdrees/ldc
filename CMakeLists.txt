@@ -31,7 +31,7 @@ endfunction()
 # Locate LLVM.
 #
 
-find_package(LLVM 3.9 REQUIRED
+find_package(LLVM 6.0 REQUIRED
     all-targets analysis asmparser asmprinter bitreader bitwriter codegen core
     debuginfodwarf debuginfomsf debuginfopdb demangle
     instcombine ipo instrumentation irreader libdriver linker lto mc
@@ -110,10 +110,10 @@ include(GetLinuxDistribution)
 #
 
 # Version information
-set(LDC_VERSION "1.21.0") # May be overridden by git hash tag
+set(LDC_VERSION "1.23.0") # May be overridden by git hash tag
 set(DMDFE_MAJOR_VERSION   2)
 set(DMDFE_MINOR_VERSION   0)
-set(DMDFE_PATCH_VERSION   92)
+set(DMDFE_PATCH_VERSION   93)
 set(DMDFE_FIX_LEVEL       0)
 
 set(DMD_VERSION ${DMDFE_MAJOR_VERSION}.${DMDFE_MINOR_VERSION}${DMDFE_PATCH_VERSION})
@@ -140,10 +140,6 @@ set(CONF_INST_DIR ${SYSCONF_INSTALL_DIR} CACHE PATH "Directory ldc.conf is insta
 set(LIB_SUFFIX "" CACHE STRING "Appended to the library installation directory. Set to '64' to install libraries into ${PREFIX}/lib64.")
 
 set(COMPILE_D_MODULES_SEPARATELY OFF CACHE BOOL "Compile each D module separately (instead of all at once). Useful for many CPU cores and/or iterative development; generated executables will be somewhat slower.")
-
-# The following flag is currently not well tested, expect the build to fail.
-option(GENERATE_OFFTI "generate complete ClassInfo.offTi arrays")
-mark_as_advanced(GENERATE_OFFTI)
 
 if(D_VERSION EQUAL 1)
     message(FATAL_ERROR "D version 1 is no longer supported.
@@ -220,7 +216,7 @@ if(MSVC)
     endforeach()
 endif()
 
-append("-J${PROJECT_SOURCE_DIR}/res" DDMD_DFLAGS) # Needed for importing text files
+append("-J${PROJECT_SOURCE_DIR}/dmd/res" DDMD_DFLAGS) # Needed for importing text files
 string(STRIP "${DDMD_DFLAGS}" DDMD_DFLAGS)
 
 # Use separate compiler flags for the frontend and for the LDC-specific parts,
@@ -308,8 +304,7 @@ if (UNIX AND NOT "${LLVM_LDFLAGS}" STREQUAL "")
 endif()
 if(MSVC)
     separate_arguments(LLVM_LDFLAGS WINDOWS_COMMAND "${LLVM_LDFLAGS}")
-    # LLVM 5.0+ requires diaguids.lib from MS Debug Interface Access SDK
-    if(NOT (LDC_LLVM_VER LESS 500))
+    if(NOT MSVC_IDE) # apparently not needed for VS (and spaces in path are problematic)
         if(CMAKE_SIZEOF_VOID_P EQUAL 8)
             list(APPEND LLVM_LDFLAGS "$ENV{VSINSTALLDIR}DIA SDK\\lib\\amd64\\diaguids.lib")
         else()
@@ -363,16 +358,16 @@ configure_file(driver/ldc-version.cpp.in driver/ldc-version.cpp)
 
 # Also add the header files to the build so that they are available in IDE
 # project files generated via CMake.
-file(GLOB_RECURSE FE_SRC_D dmd/*.d)
-file(GLOB_RECURSE FE_HDR   dmd/*.h)
-file(GLOB_RECURSE FE_RES   res/*.*)
-file(GLOB_RECURSE GEN_SRC gen/*.cpp)
-file(GLOB_RECURSE GEN_HDR gen/*.h)
-file(GLOB_RECURSE GEN_SRC_D gen/*.d)
-file(GLOB_RECURSE DRV_SRC_D driver/*.d)
-file(GLOB_RECURSE IR_SRC_D ir/*.d)
-file(GLOB IR_SRC ir/*.cpp)
-file(GLOB IR_HDR ir/*.h)
+file(GLOB_RECURSE FE_SRC_D   dmd/*.d)
+file(GLOB_RECURSE FE_HDR     dmd/*.h)
+file(GLOB_RECURSE FE_RES     dmd/res/*.*)
+file(GLOB_RECURSE GEN_SRC    gen/*.cpp)
+file(GLOB_RECURSE GEN_HDR    gen/*.h)
+file(GLOB_RECURSE GEN_SRC_D  gen/*.d)
+file(GLOB_RECURSE IR_SRC     ir/*.cpp)
+file(GLOB_RECURSE IR_HDR     ir/*.h)
+file(GLOB_RECURSE IR_SRC_D   ir/*.d)
+file(GLOB_RECURSE DRV_SRC_D  driver/*.d)
 set(DRV_SRC
     driver/args.cpp
     driver/cache.cpp
@@ -393,8 +388,8 @@ set(DRV_SRC
     driver/linker-msvc.cpp
     driver/main.cpp
     driver/plugins.cpp
-    ${CMAKE_BINARY_DIR}/driver/ldc-version.cpp
 )
+set(DRV_SRC_EXTRA ${CMAKE_BINARY_DIR}/driver/ldc-version.cpp)
 set(DRV_HDR
     driver/args.h
     driver/cache.h
@@ -425,21 +420,23 @@ set(LDC_CXX_SOURCE_FILES
     ${GEN_HDR}
     ${IR_SRC}
     ${IR_HDR}
+    ${DRV_SRC}
+    ${DRV_SRC_EXTRA}
+    ${DRV_HDR}
 )
 set(LDC_D_SOURCE_FILES
     ${FE_SRC_D}
     ${GEN_SRC_D}
-    ${DRV_SRC_D}
     ${IR_SRC_D}
+    ${DRV_SRC_D}
 )
 
-source_group("Source Files\\dmd" FILES ${FE_SRC_D})
-source_group("Header Files\\dmd" FILES ${FE_HDR})
-source_group("Source Files\\gen" FILES ${GEN_SRC} ${GEN_SRC_D})
-source_group("Header Files\\gen" FILES ${GEN_HDR})
-source_group("Source Files\\ir" FILES ${IR_SRC} ${IR_SRC_D})
-source_group("Header Files\\ir" FILES ${IR_HDR})
-source_group("Source Files" FILES ${DRV_SRC_D})
+# source_group(TREE ...) requires CMake v3.8+
+IF("${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION}" VERSION_GREATER 3.7)
+    source_group(TREE "${PROJECT_SOURCE_DIR}" PREFIX "Source Files" FILES ${FE_SRC_D} ${GEN_SRC} ${GEN_SRC_D} ${IR_SRC} ${IR_SRC_D} ${DRV_SRC} ${DRV_SRC_D})
+    source_group("Source Files\\driver"                             FILES ${DRV_SRC_EXTRA})
+    source_group(TREE "${PROJECT_SOURCE_DIR}" PREFIX "Header Files" FILES ${FE_HDR} ${GEN_HDR} ${IR_HDR} ${DRV_HDR})
+endif()
 
 
 #
@@ -453,10 +450,7 @@ include(HandleLTOPGOBuildOptions)
 set(LDC_DYNAMIC_COMPILE "AUTO" CACHE STRING "Support dynamic compilation (ON|OFF). Enabled by default.")
 option(LDC_DYNAMIC_COMPILE_USE_CUSTOM_PASSES "Use custom LDC passes in jit" ON)
 if(LDC_DYNAMIC_COMPILE STREQUAL "AUTO")
-    set(LDC_DYNAMIC_COMPILE OFF)
-    if (NOT (LDC_LLVM_VER LESS 500))
-        set(LDC_DYNAMIC_COMPILE ON)
-    endif()
+    set(LDC_DYNAMIC_COMPILE ON)
 endif()
 message(STATUS "Building LDC with dynamic compilation support: ${LDC_DYNAMIC_COMPILE} (LDC_DYNAMIC_COMPILE=${LDC_DYNAMIC_COMPILE})")
 if(LDC_DYNAMIC_COMPILE)
@@ -485,16 +479,11 @@ append("\"-DLDC_LIBDIR_SUFFIX=R\\\"(${LIB_SUFFIX})\\\"\"" LDC_CXXFLAGS)
 append("-DLDC_HOST_${D_COMPILER_ID}=1" LDC_CXXFLAGS)
 append("-DLDC_HOST_FE_VER=${D_COMPILER_FE_VERSION}" LDC_CXXFLAGS)
 
-if(GENERATE_OFFTI)
-    append("-DGENERATE_OFFTI" LDC_CXXFLAGS)
-endif()
-
 #
 # LLD integration (requires headers & libs)
 #
 if(NOT DEFINED LDC_WITH_LLD)
-    if(((LDC_LLVM_VER LESS 600) AND (EXISTS "${LLVM_INCLUDE_DIRS}/lld/Driver/Driver.h")) OR
-       ((NOT LDC_LLVM_VER LESS 600) AND (EXISTS "${LLVM_INCLUDE_DIRS}/lld/Common/Driver.h")))
+    if(EXISTS "${LLVM_INCLUDE_DIRS}/lld/Common/Driver.h")
         set(LDC_WITH_LLD ON)
     else()
         set(LDC_WITH_LLD OFF)
@@ -504,15 +493,6 @@ if(LDC_WITH_LLD)
     append("-DLDC_WITH_LLD" LDC_CXXFLAGS)
 endif()
 message(STATUS "Building LDC with integrated LLD: ${LDC_WITH_LLD} (LDC_WITH_LLD=${LDC_WITH_LLD})")
-
-#
-# Enable building with riscv-llvm, for full RISC-V support.
-#
-option(RISCV_LLVM_DEV "full RISC-V support with riscv-llvm")
-mark_as_advanced(RISCV_LLVM_DEV)
-if(RISCV_LLVM_DEV)
-    append("-DRISCV_LLVM_DEV" LDC_CXXFLAGS)
-endif()
 
 # if llvm was built with assertions we have to do the same
 # as there are some headers with differing behavior based on NDEBUG
@@ -556,10 +536,17 @@ endif()
 
 set(LDC_LIB LDCShared)
 set(LDC_LIB_EXTRA_SOURCES "")
-if(MSVC_IDE)
+if(MSVC_IDE) # Visual Studio generator
+    # Add the .d files as (Visual D) source files to this lib, so that they show up somewhere.
     set(LDC_LIB_EXTRA_SOURCES ${LDC_D_SOURCE_FILES})
+    set_property(SOURCE ${LDC_LIB_EXTRA_SOURCES} PROPERTY VS_TOOL_OVERRIDE "DCompile")
+    # 'Clear' the original list for the custom commands below, producing ldc2.exe and ldc2-unittest.exe -
+    # we still need a dummy .d file.
+    set(LDC_D_SOURCE_FILES "${PROJECT_SOURCE_DIR}/dmd/root/man.d")
+    # Mark this main library target as (bold) startup project for the generated Visual Studio solution.
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${LDC_LIB})
 endif()
-add_library(${LDC_LIB} ${LDC_LIB_TYPE} ${LDC_CXX_SOURCE_FILES} ${DRV_SRC} ${DRV_HDR} ${LDC_LIB_EXTRA_SOURCES})
+add_library(${LDC_LIB} ${LDC_LIB_TYPE} ${LDC_CXX_SOURCE_FILES} ${LDC_LIB_EXTRA_SOURCES})
 set_target_properties(
     ${LDC_LIB} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
@@ -571,6 +558,8 @@ set_target_properties(
     COMPILE_FLAGS "${LLVM_CXXFLAGS} ${LDC_CXXFLAGS} ${EXTRA_CXXFLAGS}"
     LINKER_LANGUAGE ${LDC_LIB_LANGUAGE}
     LINK_FLAGS "${SANITIZE_LDFLAGS}"
+    # Use a custom .props file to set up Visual D (import paths, predefined versions...).
+    VS_USER_PROPS "${PROJECT_SOURCE_DIR}/cmake/VisualD.props"
 )
 # LDFLAGS should actually be in target property LINK_FLAGS, but this works, and gets around linking problems
 target_link_libraries(${LDC_LIB} ${LLVM_LIBRARIES} ${LLVM_LDFLAGS})
@@ -604,22 +593,13 @@ if(LDC_WITH_LLD)
             set(LDC_LINKERFLAG_LIST -lLLVMSymbolize ${LDC_LINKERFLAG_LIST})
         endif()
     endif()
-    # ELF, Mach-O, MinGW and WebAssembly formats supported since LLD 6.0.0, otherwise just Windows COFF
-    if(NOT (LDC_LLVM_VER LESS 600))
-        if(MSVC)
-            list(APPEND LDC_LINKERFLAG_LIST lldDriver.lib lldMinGW.lib lldCOFF.lib lldELF.lib lldMachO.lib lldWasm.lib lldYAML.lib lldReaderWriter.lib lldCommon.lib lldCore.lib)
-        else()
-            set(LDC_LINKERFLAG_LIST -llldDriver -llldMinGW -llldCOFF -llldELF -llldMachO -llldWasm -llldYAML -llldReaderWriter -llldCommon -llldCore ${LDC_LINKERFLAG_LIST})
-        endif()
-        if(APPLE) # bug, should be fixed in LLVM 6.0.1
-            list(APPEND LDC_LINKERFLAG_LIST -lxml2)
-        endif()
+    if(MSVC)
+        list(APPEND LDC_LINKERFLAG_LIST lldDriver.lib lldMinGW.lib lldCOFF.lib lldELF.lib lldMachO.lib lldWasm.lib lldYAML.lib lldReaderWriter.lib lldCommon.lib lldCore.lib)
     else()
-        if(MSVC)
-            list(APPEND LDC_LINKERFLAG_LIST lldCOFF.lib lldCore.lib lldDriver.lib)
-        else()
-            set(LDC_LINKERFLAG_LIST -llldCOFF -llldCore -llldDriver ${LDC_LINKERFLAG_LIST})
-        endif()
+        set(LDC_LINKERFLAG_LIST -llldDriver -llldMinGW -llldCOFF -llldELF -llldMachO -llldWasm -llldYAML -llldReaderWriter -llldCommon -llldCore ${LDC_LINKERFLAG_LIST})
+    endif()
+    if(APPLE) # bug, should be fixed in LLVM 6.0.1
+        list(APPEND LDC_LINKERFLAG_LIST -lxml2)
     endif()
 endif()
 
@@ -663,28 +643,16 @@ if(UNIX AND (CMAKE_COMPILER_IS_GNUCXX OR (${CMAKE_CXX_COMPILER_ID} MATCHES "Clan
     endif()
 endif()
 
-# CONFIG generator expressions need to be repeated due to https://cmake.org/Bug/view.php?id=14353
-if(MSVC_IDE)
-    translate_linker_args(linker_args translated_linker_args)
-    separate_arguments(LDC_FLAG_LIST WINDOWS_COMMAND "${D_COMPILER_FLAGS} ${DDMD_DFLAGS} ${DDMD_LFLAGS} ${translated_linker_args}")
-    add_custom_command(
-        OUTPUT ${LDC_EXE_FULL}
-        COMMAND ${D_COMPILER} -L$<TARGET_LINKER_FILE:${LDC_LIB}> ${LDC_FLAG_LIST} -of${LDC_EXE_FULL} ${LDC_D_SOURCE_FILES} $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:-g> $<$<NOT:$<CONFIG:Debug>>:-O> $<$<NOT:$<CONFIG:Debug>>:-inline> $<$<NOT:$<CONFIG:Debug>>:-release>
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        DEPENDS ${LDC_D_SOURCE_FILES} ${FE_RES} ${LDC_LIB}
-    )
-else()
-    build_d_executable(
-        "${LDC_EXE}"
-        "${LDC_EXE_FULL}"
-        "${LDC_D_SOURCE_FILES}"
-        ""
-        "${LDC_LINKERFLAG_LIST}"
-        "${FE_RES}"
-        "${LDC_LIB}"
-        ${COMPILE_D_MODULES_SEPARATELY}
-    )
-endif()
+build_d_executable(
+    "${LDC_EXE}"
+    "${LDC_EXE_FULL}"
+    "${LDC_D_SOURCE_FILES}"
+    ""
+    "${LDC_LINKERFLAG_LIST}"
+    "${FE_RES}"
+    "${LDC_LIB}"
+    ${COMPILE_D_MODULES_SEPARATELY}
+)
 
 if(MSVC_IDE)
     # the IDE generator is a multi-config one
@@ -739,14 +707,14 @@ function(copy_and_rename_file source_path target_path)
 endfunction()
 
 #
-# Locate LLVM's LTO binary and use it (LLVM >= 3.9)
+# Locate LLVM's LTO binary and use it
 #
 if(APPLE)
     set(LDC_INSTALL_LTOPLUGIN_DEFAULT ON)
 else()
     set(LDC_INSTALL_LTOPLUGIN_DEFAULT OFF)
 endif()
-set(LDC_INSTALL_LTOPLUGIN ${LDC_INSTALL_LTOPLUGIN_DEFAULT} CACHE BOOL "Copy/install the LTO plugin from the LLVM package when available (LLVM >= 3.9).")
+set(LDC_INSTALL_LTOPLUGIN ${LDC_INSTALL_LTOPLUGIN_DEFAULT} CACHE BOOL "Copy/install the LTO plugin from the LLVM package when available.")
 if (LDC_INSTALL_LTOPLUGIN)
     if(APPLE)
         set(LLVM_LTO_BINARY ${LLVM_LIBRARY_DIRS}/libLTO.dylib)
@@ -792,16 +760,13 @@ include(CheckTypeSize)
 check_type_size(void* ptr_size)
 if (LDC_INSTALL_LLVM_RUNTIME_LIBS)
     # Locate LLVM sanitizer runtime libraries, and copy them to our lib folder
-    # Note: libFuzzer is part of compiler-rt version >= 6.0, but was part of LLVM =< 5.0
 
     if(APPLE)
         copy_compilerrt_lib("darwin/libclang_rt.asan_osx_dynamic.dylib" "libldc_rt.asan.dylib" TRUE)
         copy_compilerrt_lib("darwin/libclang_rt.osx.a"                  "libldc_rt.builtins.a" FALSE)
         copy_compilerrt_lib("darwin/libclang_rt.profile_osx.a"          "libldc_rt.profile.a"  FALSE)
-        if(NOT (LDC_LLVM_VER LESS 600))
-            copy_compilerrt_lib("darwin/libclang_rt.fuzzer_osx.a"       "libldc_rt.fuzzer.a"   FALSE)
-            copy_compilerrt_lib("darwin/libclang_rt.xray_osx.a"         "libldc_rt.xray.a"     FALSE)
-        endif()
+        copy_compilerrt_lib("darwin/libclang_rt.fuzzer_osx.a"           "libldc_rt.fuzzer.a"   FALSE)
+        copy_compilerrt_lib("darwin/libclang_rt.xray_osx.a"             "libldc_rt.xray.a"     FALSE)
         if(NOT (LDC_LLVM_VER LESS 700))
             copy_compilerrt_lib("darwin/libclang_rt.xray-basic_osx.a"      "libldc_rt.xray-basic.a"     FALSE)
             copy_compilerrt_lib("darwin/libclang_rt.xray-fdr_osx.a"        "libldc_rt.xray-fdr.a"       FALSE)
@@ -814,12 +779,8 @@ if (LDC_INSTALL_LLVM_RUNTIME_LIBS)
         copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.asan-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"       "libldc_rt.asan.a"     FALSE)
         copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.builtins-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"   "libldc_rt.builtins.a" FALSE)
         copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.profile-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"    "libldc_rt.profile.a"  FALSE)
-        if(NOT (LDC_LLVM_VER LESS 500))
-            copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.xray-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"   "libldc_rt.xray.a"     FALSE)
-        endif()
-        if(NOT (LDC_LLVM_VER LESS 600))
-            copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.fuzzer-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a" "libldc_rt.fuzzer.a"   FALSE)
-        endif()
+        copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.xray-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"       "libldc_rt.xray.a"     FALSE)
+        copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.fuzzer-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"     "libldc_rt.fuzzer.a"   FALSE)
         if(NOT (LDC_LLVM_VER LESS 700))
             copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.xray-basic-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"      "libldc_rt.xray-basic.a"     FALSE)
             copy_compilerrt_lib("${LDC_INSTALL_LLVM_RUNTIME_LIBS_OS}/libclang_rt.xray-fdr-${LDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH}.a"        "libldc_rt.xray-fdr.a"       FALSE)
@@ -833,26 +794,12 @@ if (LDC_INSTALL_LLVM_RUNTIME_LIBS)
         copy_compilerrt_lib("windows/clang_rt.asan-${compilerrt_arch_suffix}.lib"       "ldc_rt.asan.lib"     FALSE)
         copy_compilerrt_lib("windows/clang_rt.builtins-${compilerrt_arch_suffix}.lib"   "ldc_rt.builtins.lib" FALSE)
         copy_compilerrt_lib("windows/clang_rt.profile-${compilerrt_arch_suffix}.lib"    "ldc_rt.profile.lib"  FALSE)
-        if(NOT (LDC_LLVM_VER LESS 600))
-            copy_compilerrt_lib("windows/clang_rt.fuzzer-${compilerrt_arch_suffix}.lib" "ldc_rt.fuzzer.lib"   FALSE)
-            copy_compilerrt_lib("windows/clang_rt.xray-${compilerrt_arch_suffix}.lib"   "ldc_rt.xray.lib"     FALSE)
-        endif()
+        copy_compilerrt_lib("windows/clang_rt.fuzzer-${compilerrt_arch_suffix}.lib"     "ldc_rt.fuzzer.lib"   FALSE)
+        copy_compilerrt_lib("windows/clang_rt.xray-${compilerrt_arch_suffix}.lib"       "ldc_rt.xray.lib"     FALSE)
         if(NOT (LDC_LLVM_VER LESS 700))
             copy_compilerrt_lib("windows/clang_rt.xray-basic-${compilerrt_arch_suffix}.lib"      "ldc_rt.xray-basic.lib"     FALSE)
             copy_compilerrt_lib("windows/clang_rt.xray-fdr-${compilerrt_arch_suffix}.lib"        "ldc_rt.xray-fdr.lib"       FALSE)
             copy_compilerrt_lib("windows/clang_rt.xray-profiling-${compilerrt_arch_suffix}.lib"  "ldc_rt.xray-profiling.lib" FALSE)
-        endif()
-    endif()
-
-    if(LDC_LLVM_VER LESS 600)
-        set(LLVM_LIBFUZZER_PATH ${LLVM_LIBRARY_DIRS}/libFuzzer.a)
-        if(EXISTS ${LLVM_LIBFUZZER_PATH})
-            message(STATUS "Copying libFuzzer library: ${LLVM_LIBFUZZER_PATH} --> libFuzzer.a")
-            file(MAKE_DIRECTORY ${PROJECT_BINARY_DIR}/lib${LIB_SUFFIX})
-            file(COPY ${LLVM_LIBFUZZER_PATH} DESTINATION ${PROJECT_BINARY_DIR}/lib${LIB_SUFFIX})
-            install(FILES ${PROJECT_BINARY_DIR}/lib${LIB_SUFFIX}/libFuzzer.a DESTINATION ${CMAKE_INSTALL_PREFIX}/lib${LIB_SUFFIX})
-        else()
-            message(STATUS "Not found: ${LLVM_LIBFUZZER_PATH}")
         endif()
     endif()
 endif()
@@ -931,11 +878,6 @@ if(${BUILD_SHARED})
     install(TARGETS ${LDC_LIB} DESTINATION ${CMAKE_INSTALL_PREFIX}/lib${LIB_SUFFIX})
 endif()
 install(FILES ${PROJECT_BINARY_DIR}/bin/${LDC_EXE}_install.conf DESTINATION ${CONF_INST_DIR} RENAME ${LDC_EXE}.conf)
-
-if(MSVC)
-    file(COPY vcbuild/ DESTINATION ${PROJECT_BINARY_DIR}/bin FILES_MATCHING PATTERN "*.bat")
-    install(DIRECTORY vcbuild/ DESTINATION ${CMAKE_INSTALL_PREFIX}/bin FILES_MATCHING PATTERN "*.bat")
-endif()
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     if(NOT DEFINED BASH_COMPLETION_COMPLETIONSDIR)

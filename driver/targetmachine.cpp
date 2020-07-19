@@ -124,6 +124,13 @@ static std::string getX86TargetCPU(const llvm::Triple &triple) {
   if (triple.isOSDarwin()) {
     return triple.isArch64Bit() ? "core2" : "yonah";
   }
+
+  // All x86 devices running Android have core2 as their common
+  // denominator.
+  if (triple.getEnvironment() == llvm::Triple::Android) {
+    return "core2";
+  }
+
   // Everything else goes to x86-64 in 64-bit mode.
   if (triple.isArch64Bit()) {
     return "x86-64";
@@ -133,9 +140,6 @@ static std::string getX86TargetCPU(const llvm::Triple &triple) {
   }
   if (triple.getOSName().startswith("openbsd")) {
     return "i486";
-  }
-  if (triple.getOSName().startswith("bitrig")) {
-    return "i686";
   }
   if (triple.getOSName().startswith("freebsd")) {
     return "i486";
@@ -149,18 +153,20 @@ static std::string getX86TargetCPU(const llvm::Triple &triple) {
   if (triple.getOSName().startswith("dragonfly")) {
     return "i486";
   }
-  // All x86 devices running Android have core2 as their common
-  // denominator. This makes a better choice than pentium4.
-  if (triple.getEnvironment() == llvm::Triple::Android) {
-    return "core2";
 
-    // Fallback to p4.
-  }
+  // Fallback to p4.
   return "pentium4";
 }
 
 static std::string getARMTargetCPU(const llvm::Triple &triple) {
   auto defaultCPU = llvm::ARM::getDefaultCPU(triple.getArchName());
+
+  // 32-bit Android: default to cortex-a8
+  if (defaultCPU == "generic" &&
+      triple.getEnvironment() == llvm::Triple::Android) {
+    return "cortex-a8";
+  }
+
   if (!defaultCPU.empty())
     return std::string(defaultCPU);
 
@@ -175,6 +181,14 @@ static std::string getAArch64TargetCPU(const llvm::Triple &triple) {
     return std::string(defaultCPU);
 
   return "generic";
+}
+
+static std::string getRiscv32TargetCPU(const llvm::Triple &triple) {
+  return "generic-rv32";
+}
+
+static std::string getRiscv64TargetCPU(const llvm::Triple &triple) {
+  return "generic-rv64";
 }
 
 /// Returns the LLVM name of the default CPU for the provided target triple.
@@ -194,6 +208,10 @@ static std::string getTargetCPU(const llvm::Triple &triple) {
   case llvm::Triple::aarch64:
   case llvm::Triple::aarch64_be:
     return getAArch64TargetCPU(triple);
+  case llvm::Triple::riscv32:
+    return getRiscv32TargetCPU(triple);
+  case llvm::Triple::riscv64:
+    return getRiscv64TargetCPU(triple);
   }
 }
 
@@ -226,10 +244,7 @@ static const char *getLLVMArchSuffixForARM(llvm::StringRef CPU) {
 
 static FloatABI::Type getARMFloatABI(const llvm::Triple &triple,
                                      const char *llvmArchSuffix) {
-  switch (triple.getOS()) {
-  case llvm::Triple::Darwin:
-  case llvm::Triple::MacOSX:
-  case llvm::Triple::IOS: {
+  if (triple.isOSDarwin()) {
     // Darwin defaults to "softfp" for v6 and v7.
     if (llvm::StringRef(llvmArchSuffix).startswith("v6") ||
         llvm::StringRef(llvmArchSuffix).startswith("v7")) {
@@ -238,35 +253,34 @@ static FloatABI::Type getARMFloatABI(const llvm::Triple &triple,
     return FloatABI::Soft;
   }
 
-  case llvm::Triple::FreeBSD:
+  if (triple.isOSFreeBSD()) {
     // FreeBSD defaults to soft float
     return FloatABI::Soft;
+  }
 
+  if (triple.getVendorName().startswith("hardfloat"))
+    return FloatABI::Hard;
+  if (triple.getVendorName().startswith("softfloat"))
+    return FloatABI::SoftFP;
+
+  switch (triple.getEnvironment()) {
+  case llvm::Triple::GNUEABIHF:
+    return FloatABI::Hard;
+  case llvm::Triple::GNUEABI:
+    return FloatABI::SoftFP;
+  case llvm::Triple::EABI:
+    // EABI is always AAPCS, and if it was not marked 'hard', it's softfp
+    return FloatABI::SoftFP;
+  case llvm::Triple::Android: {
+    if (llvm::StringRef(llvmArchSuffix).startswith("v7")) {
+      return FloatABI::SoftFP;
+    }
+    return FloatABI::Soft;
+  }
   default:
-    if (triple.getVendorName().startswith("hardfloat"))
-      return FloatABI::Hard;
-    if (triple.getVendorName().startswith("softfloat"))
-      return FloatABI::SoftFP;
-
-    switch (triple.getEnvironment()) {
-    case llvm::Triple::GNUEABIHF:
-      return FloatABI::Hard;
-    case llvm::Triple::GNUEABI:
-      return FloatABI::SoftFP;
-    case llvm::Triple::EABI:
-      // EABI is always AAPCS, and if it was not marked 'hard', it's softfp
-      return FloatABI::SoftFP;
-    case llvm::Triple::Android: {
-      if (llvm::StringRef(llvmArchSuffix).startswith("v7")) {
-        return FloatABI::SoftFP;
-      }
-      return FloatABI::Soft;
-    }
-    default:
-      // Assume "soft".
-      // TODO: Warn the user we are guessing.
-      return FloatABI::Soft;
-    }
+    // Assume "soft".
+    // TODO: Warn the user we are guessing.
+    return FloatABI::Soft;
   }
 }
 
@@ -294,8 +308,7 @@ const llvm::Target *lookupTarget(const std::string &arch, llvm::Triple &triple,
 
     if (!target) {
       errorMsg = "invalid target architecture '" + arch +
-                 "', see "
-                 "-version for a list of supported targets.";
+                 "', see -version for a list of supported targets.";
       return nullptr;
     }
 
@@ -325,11 +338,7 @@ createTargetMachine(const std::string targetTriple, const std::string arch,
                     const ExplicitBitness::Type bitness,
                     FloatABI::Type &floatABI,
                     llvm::Optional<llvm::Reloc::Model> relocModel,
-#if LDC_LLVM_VER >= 600
                     llvm::Optional<llvm::CodeModel::Model> codeModel,
-#else
-                    llvm::CodeModel::Model codeModel,
-#endif
                     const llvm::CodeGenOpt::Level codeGenOptLevel,
                     const bool noLinkerStripDead) {
   // Determine target triple. If the user didn't explicitly specify one, use

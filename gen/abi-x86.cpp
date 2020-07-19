@@ -19,14 +19,14 @@
 #include "ir/irfuncty.h"
 
 struct X86TargetABI : TargetABI {
-  const bool isOSX;
+  const bool isDarwin;
   const bool isMSVC;
   bool returnStructsInRegs;
   IntegerRewrite integerRewrite;
   IndirectByvalRewrite indirectByvalRewrite;
 
   X86TargetABI()
-      : isOSX(global.params.targetTriple->isMacOSX()),
+      : isDarwin(global.params.targetTriple->isOSDarwin()),
         isMSVC(global.params.targetTriple->isWindowsMSVCEnvironment()) {
     using llvm::Triple;
     auto os = global.params.targetTriple->getOS();
@@ -87,8 +87,7 @@ struct X86TargetABI : TargetABI {
       return false;
 
     Type *rt = tf->next->toBasetype();
-    const bool externD =
-        (tf->linkage == LINKd && tf->parameterList.varargs != VARARGvariadic);
+    const bool externD = isExternD(tf);
 
     // non-aggregates are returned directly
     if (!isAggregate(rt))
@@ -136,12 +135,11 @@ struct X86TargetABI : TargetABI {
   }
 
   void rewriteFunctionType(IrFuncTy &fty) override {
-    const bool externD = (fty.type->linkage == LINKd &&
-                          fty.type->parameterList.varargs != VARARGvariadic);
+    const bool externD = isExternD(fty.type);
 
     // return value:
     if (!fty.ret->byref) {
-      Type *rt = fty.type->next->toBasetype(); // for sret, rt == void
+      Type *rt = fty.ret->type->toBasetype(); // for sret, rt == void
       if (isAggregate(rt) && canRewriteAsInt(rt) &&
           // don't rewrite cfloat for extern(D)
           !(externD && rt->ty == Tcomplex32)) {
@@ -208,8 +206,8 @@ struct X86TargetABI : TargetABI {
 
     // Clang does not pass empty structs, while it seems that GCC does,
     // at least on Linux x86. We don't know whether the C compiler will
-    // be Clang or GCC, so just assume Clang on OS X and G++ on Linux.
-    if (externD || !isOSX)
+    // be Clang or GCC, so just assume Clang on Darwin and G++ on Linux.
+    if (externD || !isDarwin)
       return;
 
     size_t i = 0;
@@ -249,7 +247,7 @@ struct X86TargetABI : TargetABI {
 
   const char *objcMsgSendFunc(Type *ret, IrFuncTy &fty) override {
     // see objc/message.h for objc_msgSend selection rules
-    assert(isOSX);
+    assert(isDarwin);
     if (fty.arg_sret) {
       return "objc_msgSend_stret";
     }

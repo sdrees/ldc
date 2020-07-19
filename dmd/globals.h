@@ -115,6 +115,7 @@ struct Param
     bool vcg_ast;       // write-out codegen-ast
     bool showColumns;   // print character (column) numbers in diagnostics
     bool vtls;          // identify thread local variables
+    bool vtemplates;    // collect and list statistics on template instantiations
     bool vgc;           // identify gc usage
     bool vfield;        // identify non-mutable field variables
     bool vcomplex;      // identify complex/imaginary type usage
@@ -268,6 +269,7 @@ struct Param
 
     // LDC stuff
     OUTPUTFLAG output_ll;
+    OUTPUTFLAG output_mlir;
     OUTPUTFLAG output_bc;
     OUTPUTFLAG output_s;
     OUTPUTFLAG output_o;
@@ -304,6 +306,7 @@ struct Global
     DString obj_ext;
 #if IN_LLVM
     DString ll_ext;
+    DString mlir_ext; //MLIR code
     DString bc_ext;
     DString s_ext;
     DString ldc_version;

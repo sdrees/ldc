@@ -49,15 +49,15 @@
 llvm::cl::opt<llvm::GlobalVariable::ThreadLocalMode> clThreadModel(
     "fthread-model", llvm::cl::ZeroOrMore, llvm::cl::desc("Thread model"),
     llvm::cl::init(llvm::GlobalVariable::GeneralDynamicTLSModel),
-    clEnumValues(clEnumValN(llvm::GlobalVariable::GeneralDynamicTLSModel,
-                            "global-dynamic",
-                            "Global dynamic TLS model (default)"),
-                 clEnumValN(llvm::GlobalVariable::LocalDynamicTLSModel,
-                            "local-dynamic", "Local dynamic TLS model"),
-                 clEnumValN(llvm::GlobalVariable::InitialExecTLSModel,
-                            "initial-exec", "Initial exec TLS model"),
-                 clEnumValN(llvm::GlobalVariable::LocalExecTLSModel,
-                            "local-exec", "Local exec TLS model")));
+    llvm::cl::values(clEnumValN(llvm::GlobalVariable::GeneralDynamicTLSModel,
+                                "global-dynamic",
+                                "Global dynamic TLS model (default)"),
+                     clEnumValN(llvm::GlobalVariable::LocalDynamicTLSModel,
+                                "local-dynamic", "Local dynamic TLS model"),
+                     clEnumValN(llvm::GlobalVariable::InitialExecTLSModel,
+                                "initial-exec", "Initial exec TLS model"),
+                     clEnumValN(llvm::GlobalVariable::LocalExecTLSModel,
+                                "local-exec", "Local exec TLS model")));
 
 /******************************************************************************
  * Simple Triple helpers for DFE
@@ -178,10 +178,7 @@ llvm::AllocaInst *DtoArrayAlloca(Type *type, unsigned arraysize,
                                  const char *name) {
   LLType *lltype = DtoType(type);
   auto ai = new llvm::AllocaInst(
-      lltype,
-#if LDC_LLVM_VER >= 500
-      gIR->module.getDataLayout().getAllocaAddrSpace(),
-#endif
+      lltype, gIR->module.getDataLayout().getAllocaAddrSpace(),
       DtoConstUint(arraysize), name, gIR->topallocapoint());
   ai->setAlignment(LLMaybeAlign(DtoAlignment(type)));
   return ai;
@@ -189,12 +186,9 @@ llvm::AllocaInst *DtoArrayAlloca(Type *type, unsigned arraysize,
 
 llvm::AllocaInst *DtoRawAlloca(LLType *lltype, size_t alignment,
                                const char *name) {
-  auto ai =
-      new llvm::AllocaInst(lltype,
-#if LDC_LLVM_VER >= 500
-                           gIR->module.getDataLayout().getAllocaAddrSpace(),
-#endif
-                           name, gIR->topallocapoint());
+  auto ai = new llvm::AllocaInst(
+      lltype, gIR->module.getDataLayout().getAllocaAddrSpace(), name,
+      gIR->topallocapoint());
   if (alignment) {
     ai->setAlignment(LLMaybeAlign(alignment));
   }
@@ -1421,7 +1415,6 @@ void callPostblit(Loc &loc, Expression *exp, LLValue *val) {
         fd->toParent()->error(
             loc, "is not copyable because it is annotated with `@disable`");
       }
-      DtoResolveFunction(fd);
       Expressions args;
       DFuncValue dfn(fd, DtoCallee(fd), val);
       DtoCallFunction(loc, Type::basic[Tvoid], &dfn, &args);
@@ -1443,11 +1436,7 @@ bool isLLVMUnsigned(Type *t) { return t->isunsigned() || t->ty == Tpointer; }
 
 void printLabelName(std::ostream &target, const char *func_mangle,
                     const char *label_name) {
-  target << gTargetMachine->getMCAsmInfo()
-                ->getPrivateGlobalPrefix()
-#if LDC_LLVM_VER >= 400
-                .str()
-#endif
+  target << gTargetMachine->getMCAsmInfo()->getPrivateGlobalPrefix().str()
          << func_mangle << "_" << label_name;
 }
 
@@ -1621,9 +1610,8 @@ DValue *DtoSymbolAddress(Loc &loc, Type *type, Declaration *decl) {
     // We need to codegen the function here, because literals are not added
     // to the module member list.
     DtoDefineFunction(flitdecl);
-    assert(DtoCallee(flitdecl));
 
-    return new DFuncValue(flitdecl, DtoCallee(flitdecl));
+    return new DFuncValue(flitdecl, DtoCallee(flitdecl, false));
   }
 
   if (FuncDeclaration *fdecl = decl->isFuncDeclaration()) {
@@ -1700,28 +1688,19 @@ llvm::Constant *DtoConstSymbolAddress(Loc &loc, Declaration *decl) {
   }
   // static function
   if (FuncDeclaration *fd = decl->isFuncDeclaration()) {
-    DtoResolveFunction(fd);
     return DtoCallee(fd);
   }
 
   llvm_unreachable("Taking constant address not implemented.");
 }
 
-llvm::StringMap<llvm::GlobalVariable *> *
-stringLiteralCacheForType(Type *charType) {
-  switch (charType->size()) {
-  default:
-    llvm_unreachable("Unknown char type");
-  case 1:
-    return &gIR->stringLiteral1ByteCache;
-  case 2:
-    return &gIR->stringLiteral2ByteCache;
-  case 4:
-    return &gIR->stringLiteral4ByteCache;
-  }
-}
-
 llvm::Constant *buildStringLiteralConstant(StringExp *se, bool zeroTerm) {
+  if (se->sz == 1) {
+    const DString data = se->peekString();
+    return llvm::ConstantDataArray::getString(
+        gIR->context(), {data.ptr, data.length}, zeroTerm);
+  }
+
   Type *dtype = se->type->toBasetype();
   Type *cty = dtype->nextOf()->toBasetype();
 
@@ -1755,10 +1734,11 @@ llvm::GlobalVariable *declareGlobal(const Loc &loc, llvm::Module &module,
                                     llvm::Type *type,
                                     llvm::StringRef mangledName,
                                     bool isConstant, bool isThreadLocal) {
-  // No TLS support for WebAssembly; spare users from having to add __gshared
-  // everywhere.
+  // No TLS support for WebAssembly and AVR; spare users from having to add
+  // __gshared everywhere.
   const auto arch = global.params.targetTriple->getArch();
-  if (arch == llvm::Triple::wasm32 || arch == llvm::Triple::wasm64)
+  if (arch == llvm::Triple::wasm32 || arch == llvm::Triple::wasm64 ||
+      arch == llvm::Triple::avr)
     isThreadLocal = false;
 
   llvm::GlobalVariable *existing =

@@ -65,7 +65,7 @@ cl::opt<bool> invokedByLDMD("ldmd", cl::desc("Invoked by LDMD?"),
 static cl::opt<Diagnostic, true> useDeprecated(
     cl::desc("Allow deprecated language features and symbols:"), cl::ZeroOrMore,
     cl::location(global.params.useDeprecated), cl::init(DIAGNOSTICinform),
-    clEnumValues(
+    cl::values(
         clEnumValN(DIAGNOSTICoff, "d",
                    "Silently allow deprecated features and symbols"),
         clEnumValN(DIAGNOSTICinform, "dw",
@@ -90,9 +90,9 @@ static cl::opt<bool, true>
 cl::opt<unsigned char> defaultToHiddenVisibility(
     "fvisibility", cl::ZeroOrMore,
     cl::desc("Default visibility of symbols (not relevant for Windows)"),
-    clEnumValues(clEnumValN(0, "default", "Export all symbols"),
-                 clEnumValN(1, "hidden",
-                            "Only export symbols marked with 'export'")));
+    cl::values(clEnumValN(0, "default", "Export all symbols"),
+               clEnumValN(1, "hidden",
+                          "Only export symbols marked with 'export'")));
 
 static cl::opt<bool, true> verbose("v", cl::desc("Verbose"), cl::ZeroOrMore,
                                    cl::location(global.params.verbose));
@@ -105,6 +105,11 @@ static cl::opt<bool, true>
 static cl::opt<bool, true>
     vgc("vgc", cl::desc("List all gc allocations including hidden ones"),
         cl::ZeroOrMore, cl::location(global.params.vgc));
+
+static cl::opt<bool, true>
+    vtemplates("vtemplates", cl::ZeroOrMore,
+               cl::desc("List statistics on template instantiations"),
+               cl::location(global.params.vtemplates));
 
 static cl::opt<bool, true> verbose_cg("v-cg", cl::desc("Verbose codegen"),
                                       cl::ZeroOrMore,
@@ -134,7 +139,7 @@ static cl::opt<MessageStyle, true> verrorStyle(
     "verror-style", cl::ZeroOrMore, cl::location(global.params.messageStyle),
     cl::desc(
         "Set the style for file/line number annotations on compiler messages"),
-    clEnumValues(
+    cl::values(
         clEnumValN(MESSAGESTYLEdigitalmars, "digitalmars",
                    "'file(line[,column]): message' (default)"),
         clEnumValN(MESSAGESTYLEgnu, "gnu",
@@ -144,7 +149,7 @@ static cl::opt<MessageStyle, true> verrorStyle(
 
 static cl::opt<Diagnostic, true> warnings(
     cl::desc("Warnings:"), cl::ZeroOrMore, cl::location(global.params.warnings),
-    clEnumValues(
+    cl::values(
         clEnumValN(DIAGNOSTICerror, "w",
                    "Enable warnings as errors (compilation will halt)"),
         clEnumValN(DIAGNOSTICinform, "wi",
@@ -159,7 +164,7 @@ static cl::opt<CppStdRevision, true> cplusplus(
     "extern-std", cl::ZeroOrMore,
     cl::desc("C++ standard for name mangling compatibility"),
     cl::location(global.params.cplusplus),
-    clEnumValues(
+    cl::values(
         clEnumValN(CppStdRevisionCpp98, "c++98",
                    "Sets `__traits(getTargetInfo, \"cppStd\")` to `199711`"),
         clEnumValN(CppStdRevisionCpp11, "c++11",
@@ -171,7 +176,7 @@ static cl::opt<CppStdRevision, true> cplusplus(
 
 static cl::opt<unsigned char, true> debugInfo(
     cl::desc("Generating debug information:"), cl::ZeroOrMore,
-    clEnumValues(
+    cl::values(
         clEnumValN(1, "g", "Add symbolic debug info"),
         clEnumValN(2, "gc",
                    "Add symbolic debug info, optimize for non D debuggers"),
@@ -203,6 +208,9 @@ cl::opt<bool> output_bc("output-bc", cl::desc("Write LLVM bitcode"),
                         cl::ZeroOrMore);
 
 cl::opt<bool> output_ll("output-ll", cl::desc("Write LLVM IR"), cl::ZeroOrMore);
+
+cl::opt<bool> output_mlir("output-mlir", cl::desc("Write MLIR"),
+    cl::ZeroOrMore);
 
 cl::opt<bool> output_s("output-s", cl::desc("Write native assembly"),
                        cl::ZeroOrMore);
@@ -321,17 +329,17 @@ cl::list<std::string> versions(
     cl::desc("Compile in version code >= <level> or identified by <idents>"));
 
 cl::list<std::string> transitions(
-    "transition", cl::CommaSeparated, cl::value_desc("id"),
-    cl::desc("Help with language change identified by <id>, use ? for list"));
+    "transition", cl::CommaSeparated, cl::value_desc("name"),
+    cl::desc("Help with language change identified by <name>, use ? for list"));
 
-cl::list<std::string> previews("preview", cl::CommaSeparated,
-                               cl::value_desc("id"),
-                               cl::desc("Enable an upcoming language change "
-                                        "identified by <id>, use ? for list"));
+cl::list<std::string>
+    previews("preview", cl::CommaSeparated, cl::value_desc("name"),
+             cl::desc("Enable an upcoming language change "
+                      "identified by <name>, use ? for list"));
 
 cl::list<std::string> reverts(
-    "revert", cl::CommaSeparated, cl::value_desc("id"),
-    cl::desc("Revert language change identified by <id>, use ? for list"));
+    "revert", cl::CommaSeparated, cl::value_desc("name"),
+    cl::desc("Revert language change identified by <name>, use ? for list"));
 
 cl::list<std::string>
     linkerSwitches("L", cl::desc("Pass <linkerflag> to the linker"),
@@ -385,10 +393,10 @@ static cl::opt<CHECKENABLE, true, FlagParser<CHECKENABLE>>
 static cl::opt<CHECKENABLE, true> boundsCheck(
     "boundscheck", cl::ZeroOrMore, cl::desc("Array bounds check"),
     cl::location(global.params.useArrayBounds), cl::init(CHECKENABLEdefault),
-    clEnumValues(clEnumValN(CHECKENABLEoff, "off", "Disabled"),
-                 clEnumValN(CHECKENABLEsafeonly, "safeonly",
-                            "Enabled for @safe functions only"),
-                 clEnumValN(CHECKENABLEon, "on", "Enabled for all functions")));
+    cl::values(clEnumValN(CHECKENABLEoff, "off", "Disabled"),
+               clEnumValN(CHECKENABLEsafeonly, "safeonly",
+                          "Enabled for @safe functions only"),
+               clEnumValN(CHECKENABLEon, "on", "Enabled for all functions")));
 
 static cl::opt<CHECKENABLE, true, FlagParser<CHECKENABLE>> switchErrors(
     "switch-errors", cl::ZeroOrMore,
@@ -422,7 +430,7 @@ static cl::opt<CHECKACTION, true> checkAction(
     "checkaction", cl::ZeroOrMore, cl::location(global.params.checkAction),
     cl::desc("Action to take when an assert/boundscheck/final-switch fails"),
     cl::init(CHECKACTION_D),
-    clEnumValues(
+    cl::values(
         clEnumValN(CHECKACTION_D, "D",
                    "Usual D behavior of throwing an AssertError"),
         clEnumValN(CHECKACTION_C, "C",
@@ -457,16 +465,16 @@ cl::opt<bool> disableLinkerStripDead(
     cl::desc("Do not try to remove unused symbols during linking"),
     cl::cat(linkingCategory));
 
+cl::opt<bool> noPLT(
+    "fno-plt", cl::ZeroOrMore,
+    cl::desc("Do not use the PLT to make function calls"));
+
 // Math options
 bool fFastMath; // Storage for the dynamically created ffast-math option.
 llvm::FastMathFlags defaultFMF;
 void setDefaultMathOptions(llvm::TargetOptions &targetOptions) {
   if (fFastMath) {
-#if LDC_LLVM_VER >= 600
     defaultFMF.setFast();
-#else
-    defaultFMF.setUnsafeAlgebra();
-#endif
     targetOptions.UnsafeFPMath = true;
   }
 }
@@ -506,19 +514,17 @@ cl::opt<unsigned char, true, CoverageParser> coverageAnalysis(
 cl::opt<LTOKind> ltoMode(
     "flto", cl::ZeroOrMore, cl::desc("Set LTO mode, requires linker support"),
     cl::init(LTO_None),
-    clEnumValues(
+    cl::values(
         clEnumValN(LTO_Full, "full", "Merges all input into a single module"),
         clEnumValN(LTO_Thin, "thin",
                    "Parallel importing and codegen (faster than 'full')")));
 
-#if LDC_LLVM_VER >= 400
 cl::opt<std::string>
     saveOptimizationRecord("fsave-optimization-record",
                            cl::value_desc("filename"),
                            cl::desc("Generate a YAML optimization record file "
                                     "of optimizations performed by LLVM"),
                            cl::ValueOptional);
-#endif
 
 #if LDC_LLVM_SUPPORTED_TARGET_SPIRV || LDC_LLVM_SUPPORTED_TARGET_NVPTX
 cl::list<std::string>
@@ -592,7 +598,7 @@ void createClashingOptions() {
   new cl::opt<FloatABI::Type, true>(
       "float-abi", cl::desc("ABI/operations to use for floating-point types:"),
       cl::ZeroOrMore, cl::location(floatABI), cl::init(FloatABI::Default),
-      clEnumValues(
+      cl::values(
           clEnumValN(FloatABI::Default, "default",
                      "Target default floating-point ABI"),
           clEnumValN(FloatABI::Soft, "soft",
