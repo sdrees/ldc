@@ -1019,7 +1019,8 @@ public:
           llvm::BasicBlock *defaultcntr =
               irs->insertBBBefore(defaultTargetBB, "defaultcntr");
           irs->scope() = IRScope(defaultcntr);
-          PGO.emitCounterIncrement(stmt->sdefault);
+          if (stmt->sdefault)
+              PGO.emitCounterIncrement(stmt->sdefault);
           llvm::BranchInst::Create(defaultTargetBB, defaultcntr);
           // Create switch
           si = llvm::SwitchInst::Create(condVal, defaultcntr, caseCount,
@@ -1063,7 +1064,7 @@ public:
       llvm::BasicBlock *nextbb = irs->insertBBBefore(endbb, "checkcase");
       llvm::BranchInst::Create(nextbb, irs->scopebb());
 
-      if (PGO.emitsInstrumentation()) {
+      if (stmt->sdefault && PGO.emitsInstrumentation()) {
         // Prepend extra BB to "default:" to increment profiling counter.
         llvm::BasicBlock *defaultcntr =
             irs->insertBBBefore(defaultTargetBB, "defaultcntr");
@@ -1236,6 +1237,8 @@ public:
       // continue goes to next statement, break goes to end
       irs->funcGen().jumpTargets.pushLoopTarget(stmt, nextbb, endbb);
 
+      PGO.emitCounterIncrement(s);
+
       // do statement
       s->accept(this);
 
@@ -1249,6 +1252,9 @@ public:
     }
 
     irs->scope() = IRScope(endbb);
+
+    // PGO counter tracks the continuation after the loop
+    PGO.emitCounterIncrement(stmt);
 
     // end the dwarf lexical block
     irs->DBuilder.EmitBlockEnd();
