@@ -7,7 +7,7 @@ app:
     - BITRISE_PROJECT_PATH: ldc-build-runtime.tmp/TestRunner/TestRunner.xcodeproj
     - BITRISE_SCHEME: TestRunner
     - BITRISE_EXPORT_METHOD: development
-    - LLVM_VERSION: 10.0.0
+    - LLVM_VERSION: 11.0.0
     - LDC_VERSION: 1.22.0
     - IOS_VERSION: 12.0
 
@@ -53,7 +53,8 @@ workflows:
                   -DD_COMPILER=ldmd2 \
                   -DBUILD_SHARED_LIBS=OFF \
                   -DCMAKE_BUILD_TYPE=Release \
-                  -DLLVM_ROOT_DIR="$LLVM_ROOT_DIR"
+                  -DLLVM_ROOT_DIR="$LLVM_ROOT_DIR" \
+                  -DLDC_LINK_MANUALLY=OFF
                 ninja -j2
                 envman add --key LDC_BINARY --value "$(pwd)/bin/ldc2"
 

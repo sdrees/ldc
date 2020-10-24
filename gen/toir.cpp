@@ -187,12 +187,10 @@ namespace {
 void pushVarDtorCleanup(IRState *p, VarDeclaration *vd) {
   llvm::BasicBlock *beginBB = p->insertBB(llvm::Twine("dtor.") + vd->toChars());
 
-  // TODO: Clean this up with push/pop insertion point methods.
-  IRScope oldScope = p->scope();
-  p->scope() = IRScope(beginBB);
+  const auto savedInsertPoint = p->saveInsertPoint();
+  p->ir->SetInsertPoint(beginBB);
   toElemDtor(vd->edtor);
   p->funcGen().scopes.pushCleanup(beginBB, p->scopebb());
-  p->scope() = oldScope;
 }
 }
 
@@ -253,7 +251,7 @@ public:
       llvm::BasicBlock *endbb = p->insertBB("toElem.success");
       p->funcGen().scopes.runCleanups(initialCleanupScope, endbb);
       p->funcGen().scopes.popCleanups(initialCleanupScope);
-      p->scope() = IRScope(endbb);
+      p->ir->SetInsertPoint(endbb);
 
       destructTemporaries = false;
     }
@@ -434,7 +432,8 @@ public:
     // Can't just override ConstructExp::toElem because not all TOKconstruct
     // operations are actually instances of ConstructExp... Long live the DMD
     // coding style!
-    if (e->memset & referenceInit) {
+    if (static_cast<int>(e->memset) &
+        static_cast<int>(MemorySet::referenceInit)) {
       assert(e->op == TOKconstruct || e->op == TOKblit);
       auto ve = e->e1->isVarExp();
       assert(ve);
@@ -973,7 +972,7 @@ public:
       LLValue *funcval = nullptr;
       if (nonFinal) {
         DtoResolveFunction(fdecl);
-        funcval = DtoVirtualFunctionPointer(l, fdecl, e->toChars());
+        funcval = DtoVirtualFunctionPointer(l, fdecl);
       } else {
         funcval = DtoCallee(fdecl);
       }
@@ -1145,10 +1144,10 @@ public:
 
         p->ir->CreateCondBr(okCond, okbb, failbb);
 
-        p->scope() = IRScope(failbb);
+        p->ir->SetInsertPoint(failbb);
         DtoBoundsCheckFailCall(p, e->loc);
 
-        p->scope() = IRScope(okbb);
+        p->ir->SetInsertPoint(okbb);
       }
 
       // offset by lower
@@ -1267,19 +1266,19 @@ public:
                                                    lfptr, rfptr, ".fptreqcmp");
         llvm::BranchInst::Create(fptreq, fptrneq, fptreqcmp, p->scopebb());
 
-        p->scope() = IRScope(fptreq);
+        p->ir->SetInsertPoint(fptreq);
         llvm::Value *lctx = p->ir->CreateExtractValue(lhs, 0, ".lctx");
         llvm::Value *rctx = p->ir->CreateExtractValue(rhs, 0, ".rctx");
         llvm::Value *ctxcmp =
             p->ir->CreateICmp(icmpPred, lctx, rctx, ".ctxcmp");
         llvm::BranchInst::Create(dgcmpend, p->scopebb());
 
-        p->scope() = IRScope(fptrneq);
+        p->ir->SetInsertPoint(fptrneq);
         llvm::Value *fptrcmp =
             p->ir->CreateICmp(icmpPred, lfptr, rfptr, ".fptrcmp");
         llvm::BranchInst::Create(dgcmpend, p->scopebb());
 
-        p->scope() = IRScope(dgcmpend);
+        p->ir->SetInsertPoint(dgcmpend);
         llvm::PHINode *phi = p->ir->CreatePHI(ctxcmp->getType(), 2, ".dgcmp");
         phi->addIncoming(ctxcmp, fptreq);
         phi->addIncoming(fptrcmp, fptrneq);
@@ -1655,7 +1654,7 @@ public:
     // assign branch weights to this branch instruction.
 
     // failed: call assert runtime function
-    p->scope() = IRScope(failedbb);
+    p->ir->SetInsertPoint(failedbb);
 
     if (global.params.checkAction == CHECKACTION_halt) {
       p->ir->CreateCall(GET_INTRINSIC_DECL(trap), {});
@@ -1679,7 +1678,7 @@ public:
     }
 
     // passed:
-    p->scope() = IRScope(passedbb);
+    p->ir->SetInsertPoint(passedbb);
 
     // class/struct invariants
     if (global.params.useInvariants != CHECKENABLEon)
@@ -1764,7 +1763,7 @@ public:
     p->ir->CreateCondBr(ubool, isAndAnd ? rhsBB : endBB,
                         isAndAnd ? endBB : rhsBB, branchweights);
 
-    p->scope() = IRScope(rhsBB);
+    p->ir->SetInsertPoint(rhsBB);
     PGO.emitCounterIncrement(e);
     emitCoverageLinecountInc(e->e2->loc);
     DValue *v = toElemDtor(e->e2);
@@ -1776,7 +1775,7 @@ public:
 
     llvm::BasicBlock *newblock = p->scopebb();
     llvm::BranchInst::Create(endBB, p->scopebb());
-    p->scope() = IRScope(endBB);
+    p->ir->SetInsertPoint(endBB);
 
     // DMD allows stuff like `x == 0 && assert(false)`
     if (e->type->toBasetype()->ty == Tvoid) {
@@ -1821,7 +1820,7 @@ public:
     // this is sensible, since someone might goto behind the assert
     // and prevents compiler errors if a terminator follows the assert
     llvm::BasicBlock *bb = p->insertBB("afterhalt");
-    p->scope() = IRScope(bb);
+    p->ir->SetInsertPoint(bb);
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -1862,7 +1861,7 @@ public:
 
     if (e->e1->op != TOKsuper && e->e1->op != TOKdottype &&
         e->func->isVirtual() && !e->func->isFinalFunc()) {
-      castfptr = DtoVirtualFunctionPointer(u, e->func, e->toChars());
+      castfptr = DtoVirtualFunctionPointer(u, e->func);
     } else if (e->func->isAbstract()) {
       llvm_unreachable("Delegate to abstract method not implemented.");
     } else if (e->func->toParent()->isInterfaceDeclaration()) {
@@ -2003,7 +2002,7 @@ public:
     auto branchweights = PGO.createProfileWeights(truecount, falsecount);
     p->ir->CreateCondBr(cond_val, condtrue, condfalse, branchweights);
 
-    p->scope() = IRScope(condtrue);
+    p->ir->SetInsertPoint(condtrue);
     PGO.emitCounterIncrement(e);
     DValue *u = toElem(e->e1);
     if (retPtr) {
@@ -2012,7 +2011,7 @@ public:
     }
     llvm::BranchInst::Create(condend, p->scopebb());
 
-    p->scope() = IRScope(condfalse);
+    p->ir->SetInsertPoint(condfalse);
     DValue *v = toElem(e->e2);
     if (retPtr) {
       LLValue *lval = makeLValue(e->loc, v);
@@ -2020,7 +2019,7 @@ public:
     }
     llvm::BranchInst::Create(condend, p->scopebb());
 
-    p->scope() = IRScope(condend);
+    p->ir->SetInsertPoint(condend);
     if (retPtr)
       result = new DSpecialRefValue(e->type, retPtr);
   }
@@ -2165,35 +2164,12 @@ public:
     if (fd->isNested()) {
       LLType *dgty = DtoType(e->type);
 
-      LLValue *cval;
-      auto &funcGen = p->funcGen();
-      auto &irfn = funcGen.irFunc;
-      if (funcGen.nestedVar && fd->toParent2() == irfn.decl) {
-        // We check fd->toParent2() because a frame allocated in one
-        // function cannot be used for a delegate created in another
-        // function. Happens with anonymous functions.
-        cval = funcGen.nestedVar;
-      } else if (irfn.nestArg) {
-        cval = irfn.nestArg;
-      } else if (irfn.thisArg) {
-        AggregateDeclaration *ad = irfn.decl->isMember2();
-        if (!ad || !ad->vthis) {
-          cval = getNullPtr(getVoidPtrType());
-        } else {
-          cval =
-              ad->isClassDeclaration() ? DtoLoad(irfn.thisArg) : irfn.thisArg;
-          cval = DtoLoad(
-              DtoGEP(cval, 0, getFieldGEPIndex(ad, ad->vthis), ".vthis"));
-        }
-      } else {
-        cval = getNullPtr(getVoidPtrType());
-      }
+      LLValue *cval = DtoNestedContext(e->loc, fd);
       cval = DtoBitCast(cval, dgty->getContainedType(0));
 
       LLValue *castfptr = DtoBitCast(callee, dgty->getContainedType(1));
 
       result = new DImValue(e->type, DtoAggrPair(cval, castfptr, ".func"));
-
     } else {
       result = new DFuncValue(e->type, fd, callee);
     }
@@ -2451,8 +2427,7 @@ public:
       LLValue *valuesArray = DtoAggrPaint(slice, funcTy->getParamType(2));
 
       LLValue *aa = gIR->CreateCallOrInvoke(func, aaTypeInfo, keysArray,
-                                            valuesArray, "aa")
-                        .getInstruction();
+                                            valuesArray, "aa");
       if (basetype->ty != Taarray) {
         LLValue *tmp = DtoAlloca(e->type, "aaliteral");
         DtoStore(aa, DtoGEP(tmp, 0u, 0));
@@ -2646,7 +2621,13 @@ public:
       DValue *val = toElem(e->e1);
       LLValue *llElement = getCastElement(val);
       if (auto llConstant = isaConstant(llElement)) {
-        auto vectorConstant = llvm::ConstantVector::getSplat(N, llConstant);
+#if LDC_LLVM_VER >= 1100
+        const auto elementCount = llvm::ElementCount(N, false);
+#else
+        const auto elementCount = N;
+#endif
+        auto vectorConstant =
+            llvm::ConstantVector::getSplat(elementCount, llConstant);
         DtoStore(vectorConstant, dstMem);
       } else {
         for (unsigned int i = 0; i < N; ++i) {
@@ -2664,6 +2645,14 @@ public:
 
     LLValue *vector = DtoAlloca(e->to);
     result = emitVector(e, vector);
+  }
+
+  void visit(VectorArrayExp* e) override {
+    IF_LOG Logger::print("VectorArrayExp::toElem() %s\n", e->toChars());
+    LOG_SCOPE;
+
+    DValue *vector = toElem(e->e1);
+    result = DtoCastVector(e->loc, vector, e->type);
   }
 
   //////////////////////////////////////////////////////////////////////////////

@@ -560,6 +560,7 @@ extern (C++) final class TemplateDeclaration : ScopeDsymbol
     bool isstatic;          // this is static template declaration
     bool isTrivialAliasSeq; /// matches pattern `template AliasSeq(T...) { alias AliasSeq = T; }`
     bool isTrivialAlias;    /// matches pattern `template Alias(T) { alias Alias = qualifiers(T); }`
+    bool deprecated_;       /// this template declaration is deprecated
     Prot protection;
     int inuse;              /// for recursive expansion detection
 
@@ -737,6 +738,19 @@ else
 
     override const(char)* toChars() const
     {
+        return toCharsMaybeConstraints(true);
+    }
+
+    /****************************
+     * Similar to `toChars`, but does not print the template constraints
+     */
+    const(char)* toCharsNoConstraints() const
+    {
+        return toCharsMaybeConstraints(false);
+    }
+
+    const(char)* toCharsMaybeConstraints(bool includeConstraints) const
+    {
         if (literal)
             return Dsymbol.toChars();
 
@@ -763,45 +777,14 @@ else
             }
         }
 
-        if (constraint)
+        if (includeConstraints &&
+            constraint)
         {
             buf.writestring(" if (");
             .toCBuffer(constraint, &buf, &hgs);
             buf.writeByte(')');
         }
-        return buf.extractChars();
-    }
 
-    /****************************
-     * Similar to `toChars`, but does not print the template constraints
-     */
-    const(char)* toCharsNoConstraints()
-    {
-        if (literal)
-            return Dsymbol.toChars();
-
-        OutBuffer buf;
-        HdrGenState hgs;
-
-        buf.writestring(ident.toChars());
-        buf.writeByte('(');
-        foreach (i, tp; *parameters)
-        {
-            if (i > 0)
-                buf.writestring(", ");
-            .toCBuffer(tp, &buf, &hgs);
-        }
-        buf.writeByte(')');
-
-        if (onemember)
-        {
-            FuncDeclaration fd = onemember.isFuncDeclaration();
-            if (fd && fd.type)
-            {
-                TypeFunction tf = fd.type.isTypeFunction();
-                buf.writestring(parametersTypeToChars(tf.parameterList));
-            }
-        }
         return buf.extractChars();
     }
 
@@ -872,11 +855,10 @@ else
             scx.parent = fd;
 
             Parameters* fparameters = tf.parameterList.parameters;
-            size_t nfparams = tf.parameterList.length;
-            for (size_t i = 0; i < nfparams; i++)
+            const nfparams = tf.parameterList.length;
+            foreach (i, fparam; tf.parameterList)
             {
-                Parameter fparam = tf.parameterList[i];
-                fparam.storageClass &= (STC.in_ | STC.out_ | STC.ref_ | STC.lazy_ | STC.final_ | STC.TYPECTOR | STC.nodtor);
+                fparam.storageClass &= (STC.IOR | STC.lazy_ | STC.final_ | STC.TYPECTOR | STC.nodtor);
                 fparam.storageClass |= STC.parameter;
                 if (tf.parameterList.varargs == VarArg.typesafe && i + 1 == nfparams)
                 {
@@ -892,6 +874,7 @@ else
                     continue;
                 // don't add it, if it has no name
                 auto v = new VarDeclaration(loc, fparam.type, fparam.ident, null);
+                fparam.storageClass |= STC.parameter;
                 v.storage_class = fparam.storageClass;
                 v.dsymbolSemantic(scx);
                 if (!ti.symtab)
@@ -2315,14 +2298,14 @@ else
         {
             //printf("type %s\n", ta.toChars());
             auto ad = new AliasDeclaration(Loc.initial, tp.ident, ta);
-            ad.wasTemplateParameter = true;
+            ad.storage_class |= STC.templateparameter;
             d = ad;
         }
         else if (sa)
         {
             //printf("Alias %s %s;\n", sa.ident.toChars(), tp.ident.toChars());
             auto ad = new AliasDeclaration(Loc.initial, tp.ident, sa);
-            ad.wasTemplateParameter = true;
+            ad.storage_class |= STC.templateparameter;
             d = ad;
         }
         else if (ea)
@@ -2537,6 +2520,11 @@ else
         if (dim == 0)
             return null;
         return (*parameters)[dim - 1].isTemplateTupleParameter();
+    }
+
+    extern(C++) override bool isDeprecated() const
+    {
+        return this.deprecated_;
     }
 
     /***********************************
@@ -4004,10 +3992,13 @@ MATCH deduceType(RootObject o, Scope* sc, Type tparam, TemplateParameters* param
                     return;
                 }
             L2:
-                for (size_t i = 0; i < nfparams; i++)
+                assert(nfparams <= tp.parameterList.length);
+                foreach (i, ap; tp.parameterList)
                 {
-                    Parameter a  = t .parameterList[i];
-                    Parameter ap = tp.parameterList[i];
+                    if (i == nfparams)
+                        break;
+
+                    Parameter a = t.parameterList[i];
 
                     if (!a.isCovariant(t.isref, ap) ||
                         !deduceType(a.type, sc, ap.type, parameters, dedtypes))
@@ -4815,7 +4806,7 @@ MATCH deduceType(RootObject o, Scope* sc, Type tparam, TemplateParameters* param
                 TypeFunction tf = cast(TypeFunction)e.fd.type;
                 //printf("\ttof = %s\n", tof.toChars());
                 //printf("\ttf  = %s\n", tf.toChars());
-                size_t dim = tf.parameterList.length;
+                const dim = tf.parameterList.length;
 
                 if (tof.parameterList.length != dim || tof.parameterList.varargs != tf.parameterList.varargs)
                     return;
@@ -4826,13 +4817,11 @@ MATCH deduceType(RootObject o, Scope* sc, Type tparam, TemplateParameters* param
                 foreach (tp; *e.td.parameters)
                 {
                     size_t u = 0;
-                    for (; u < dim; u++)
+                    foreach (i, p; tf.parameterList)
                     {
-                        Parameter p = tf.parameterList[u];
                         if (p.type.ty == Tident && (cast(TypeIdentifier)p.type).ident == tp.ident)
-                        {
                             break;
-                        }
+                        ++u;
                     }
                     assert(u < dim);
                     Parameter pto = tof.parameterList[u];
@@ -4948,9 +4937,8 @@ private bool reliesOnTemplateParameters(Type t, TemplateParameter[] tparams)
 
     bool visitFunction(TypeFunction t)
     {
-        foreach (i;  0 .. t.parameterList.length)
+        foreach (i, fparam; t.parameterList)
         {
-            Parameter fparam = t.parameterList[i];
             if (fparam.type.reliesOnTemplateParameters(tparams))
                 return true;
         }
@@ -5571,7 +5559,7 @@ extern (C++) final class TemplateValueParameter : TemplateParameter
             e = e.resolveLoc(instLoc, sc); // use the instantiated loc
             e = e.optimize(WANTvalue);
             if (global.errors != olderrs)
-                e = new ErrorExp();
+                e = ErrorExp.get();
         }
         return e;
     }
@@ -5806,11 +5794,6 @@ extern (C++) class TemplateInstance : ScopeDsymbol
     Dsymbol aliasdecl;          // !=null if instance is an alias for its sole member
     TemplateInstance inst;      // refer to existing instance
     ScopeDsymbol argsym;        // argument symbol table
-    int inuse;                  // for recursive expansion detection
-    int nest;                   // for recursive pretty printing detection
-    bool semantictiargsdone;    // has semanticTiargs() been done?
-    bool havetempdecl;          // if used second constructor
-    bool gagged;                // if the instantiation is done with error gagging
     size_t hash;                // cached result of toHash()
     Expressions* fargs;         // for function template, these are the function arguments
 
@@ -5823,6 +5806,45 @@ extern (C++) class TemplateInstance : ScopeDsymbol
     TemplateInstance tinst;     // enclosing template instance
     TemplateInstance tnext;     // non-first instantiated instances
     Module minst;               // the top module that instantiated this instance
+
+    private ushort _nest;       // for recursive pretty printing detection, 3 MSBs reserved for flags (below)
+    ubyte inuse;                // for recursive expansion detection
+
+    private enum Flag : uint
+    {
+        semantictiargsdone = 1u << (_nest.sizeof * 8 - 1), // MSB of _nest
+        havetempdecl = semantictiargsdone >> 1,
+        gagged = semantictiargsdone >> 2,
+        available = gagged - 1 // always last flag minus one, 1s for all available bits
+    }
+
+    extern(D) final @safe @property pure nothrow @nogc
+    {
+        ushort nest() const { return _nest & Flag.available; }
+        void nestUp() { assert(nest() < Flag.available); ++_nest; }
+        void nestDown() { assert(nest() > 0); --_nest; }
+        /// has semanticTiargs() been done?
+        bool semantictiargsdone() const { return (_nest & Flag.semantictiargsdone) != 0; }
+        void semantictiargsdone(bool x)
+        {
+            if (x) _nest |= Flag.semantictiargsdone;
+            else _nest &= ~Flag.semantictiargsdone;
+        }
+        /// if used second constructor
+        bool havetempdecl() const { return (_nest & Flag.havetempdecl) != 0; }
+        void havetempdecl(bool x)
+        {
+            if (x) _nest |= Flag.havetempdecl;
+            else _nest &= ~Flag.havetempdecl;
+        }
+        /// if the instantiation is done with error gagging
+        bool gagged() const { return (_nest & Flag.gagged) != 0; }
+        void gagged(bool x)
+        {
+            if (x) _nest |= Flag.gagged;
+            else _nest &= ~Flag.gagged;
+        }
+    }
 
     extern (D) this(const ref Loc loc, Identifier ident, Objects* tiargs)
     {
@@ -6525,10 +6547,10 @@ extern (C++) class TemplateInstance : ScopeDsymbol
             const AliasDeclaration ad = s.isAliasDeclaration();
             version (none)
             {
-                if (ad && ad.wasTemplateParameter)
+                if (ad && ad.isAliasedTemplateParameter())
                     printf("`%s` is an alias created from a template parameter\n", s.toChars());
             }
-            if (!ad || !ad.wasTemplateParameter)
+            if (!ad || !ad.isAliasedTemplateParameter())
                 s = s2;
         }
 
@@ -6607,7 +6629,7 @@ extern (C++) class TemplateInstance : ScopeDsymbol
                         tiargs.reserve(dim);
                         foreach (i, arg; *tt.arguments)
                         {
-                            if (flags & 2 && (arg.ident || arg.userAttribDecl))
+                            if (flags & 2 && (arg.storageClass & STC.parameter))
                                 tiargs.insert(j + i, arg);
                             else
                                 tiargs.insert(j + i, arg.type);
@@ -6664,11 +6686,11 @@ extern (C++) class TemplateInstance : ScopeDsymbol
                     else if (definitelyValueParameter(ea))
                     {
                         if (ea.checkValue()) // check void expression
-                            ea = new ErrorExp();
+                            ea = ErrorExp.get();
                         uint olderrs = global.errors;
                         ea = ea.ctfeInterpret();
                         if (global.errors != olderrs)
-                            ea = new ErrorExp();
+                            ea = ErrorExp.get();
                     }
                 }
                 //printf("-[%d] ea = %s %s\n", j, Token.toChars(ea.op), ea.toChars());
@@ -7100,7 +7122,7 @@ extern (C++) class TemplateInstance : ScopeDsymbol
                  */
                 //printf("tp = %p, td.parameters.dim = %d, tiargs.dim = %d\n", tp, td.parameters.dim, tiargs.dim);
                 auto tf = cast(TypeFunction)fd.type;
-                if (size_t dim = tf.parameterList.length)
+                if (tf.parameterList.length)
                 {
                     auto tp = td.isVariadic();
                     if (tp && td.parameters.dim > 1)
@@ -7116,10 +7138,10 @@ extern (C++) class TemplateInstance : ScopeDsymbol
                         }
                     }
 
-                    foreach (size_t i; 0 .. dim)
+                    foreach (i, fparam; tf.parameterList)
                     {
                         // 'auto ref' needs inference.
-                        if (tf.parameterList[i].storageClass & STC.auto_)
+                        if (fparam.storageClass & STC.auto_)
                             return 1;
                     }
                 }
@@ -8239,30 +8261,52 @@ struct TemplateStats
     uint numInstantiations;     // number of instantiations of the template
     uint uniqueInstantiations;  // number of unique instantiations of the template
 
+    TemplateInstances* allInstances;
+
     /*******************************
      * Add this instance
      */
-    static void incInstance(const TemplateDeclaration td)
+    static void incInstance(const TemplateDeclaration td,
+                            const TemplateInstance ti)
     {
+        void log(ref TemplateStats ts)
+        {
+            if (ts.allInstances is null)
+                ts.allInstances = new TemplateInstances();
+            if (global.params.vtemplatesListInstances)
+                ts.allInstances.push(cast() ti);
+        }
+
+    // message(ti.loc, "incInstance %p %p", td, ti);
         if (!global.params.vtemplates)
             return;
         if (!td)
             return;
+        assert(ti);
         if (auto ts = cast(const void*) td in stats)
+        {
+            log(*ts);
             ++ts.numInstantiations;
+        }
         else
+        {
             stats[cast(const void*) td] = TemplateStats(1, 0);
+            log(stats[cast(const void*) td]);
+        }
     }
 
     /*******************************
      * Add this unique instance
      */
-    static void incUnique(const TemplateDeclaration td)
+    static void incUnique(const TemplateDeclaration td,
+                          const TemplateInstance ti)
     {
+        // message(ti.loc, "incUnique %p %p", td, ti);
         if (!global.params.vtemplates)
             return;
         if (!td)
             return;
+        assert(ti);
         if (auto ts = cast(const void*) td in stats)
             ++ts.uniqueInstantiations;
         else
@@ -8270,15 +8314,60 @@ struct TemplateStats
     }
 }
 
-
 void printTemplateStats()
 {
+    static struct TemplateDeclarationStats
+    {
+        TemplateDeclaration td;
+        TemplateStats ts;
+        static int compare(scope const TemplateDeclarationStats* a,
+                           scope const TemplateDeclarationStats* b) @safe nothrow @nogc pure
+        {
+            auto diff = b.ts.uniqueInstantiations - a.ts.uniqueInstantiations;
+            if (diff)
+                return diff;
+            else
+                return b.ts.numInstantiations - a.ts.numInstantiations;
+        }
+    }
+
     if (!global.params.vtemplates)
         return;
 
-    printf("  Number   Unique   Name\n");
-    foreach (td, ref ts; TemplateStats.stats)
+    Array!(TemplateDeclarationStats) sortedStats;
+    sortedStats.reserve(TemplateStats.stats.length);
+    foreach (td_, ref ts; TemplateStats.stats)
     {
-        printf("%8u %8u   %s\n", ts.numInstantiations, ts.uniqueInstantiations, (cast(const TemplateDeclaration) td).toChars());
+        sortedStats.push(TemplateDeclarationStats(cast(TemplateDeclaration) td_, ts));
+    }
+
+    sortedStats.sort!(TemplateDeclarationStats.compare);
+
+    foreach (const ref ss; sortedStats[])
+    {
+        if (global.params.vtemplatesListInstances &&
+            ss.ts.allInstances)
+        {
+            message(ss.td.loc,
+                    "vtemplate: %u (%u unique) instantiation(s) of template `%s` found, they are:",
+                    ss.ts.numInstantiations,
+                    ss.ts.uniqueInstantiations,
+                    ss.td.toCharsNoConstraints());
+            foreach (const ti; (*ss.ts.allInstances)[])
+            {
+                if (ti.tinst)   // if has enclosing instance
+                    message(ti.loc, "vtemplate: implicit instance `%s`", ti.toChars());
+                else
+                    message(ti.loc, "vtemplate: explicit instance `%s`", ti.toChars());
+            }
+        }
+        else
+        {
+            message(ss.td.loc,
+                    "vtemplate: %u (%u unique) instantiation(s) of template `%s` found",
+                    ss.ts.numInstantiations,
+                    ss.ts.uniqueInstantiations,
+                    ss.td.toCharsNoConstraints());
+        }
     }
 }

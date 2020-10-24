@@ -178,7 +178,7 @@ enum CHUNK_SIZE = (256 * 4096 - 64);
 __gshared size_t heapleft = 0;
 __gshared void* heapp;
 
-extern (C) void* allocmemory(size_t m_size) nothrow @nogc
+extern (D) void* allocmemoryNoFree(size_t m_size) nothrow @nogc
 {
     // 16 byte alignment is better (and sometimes needed) for doubles
     m_size = (m_size + 15) & ~15;
@@ -201,6 +201,15 @@ extern (C) void* allocmemory(size_t m_size) nothrow @nogc
     heapleft = CHUNK_SIZE;
     heapp = Mem.check(malloc(CHUNK_SIZE));
     goto L1;
+}
+
+extern (D) void* allocmemory(size_t m_size) nothrow
+{
+    version (GC)
+        if (mem.isGCEnabled)
+            return GC.malloc(m_size);
+
+    return allocmemoryNoFree(m_size);
 }
 
 version (DigitalMars)
@@ -228,16 +237,12 @@ else
 static if (OVERRIDE_MEMALLOC)
 {
     // Override the host druntime allocation functions in order to use the bump-
-    // pointer allocation scheme (`allocmemory()` above) if the GC is disabled.
+    // pointer allocation scheme (`allocmemoryNoFree()` above) if the GC is disabled.
     // That scheme is faster and comes with less memory overhead than using a
     // disabled GC alone.
 
     extern (C) void* _d_allocmemory(size_t m_size) nothrow
     {
-        version (GC)
-            if (mem.isGCEnabled)
-                return GC.malloc(m_size);
-
         return allocmemory(m_size);
     }
 
@@ -266,9 +271,9 @@ static if (OVERRIDE_MEMALLOC)
         const initializer = ci.initializer;
 
         version (GC)
-            auto p = mem.isGCEnabled ? allocClass(ci) : allocmemory(initializer.length);
+            auto p = mem.isGCEnabled ? allocClass(ci) : allocmemoryNoFree(initializer.length);
         else
-            auto p = allocmemory(initializer.length);
+            auto p = allocmemoryNoFree(initializer.length);
 
         memcpy(p, initializer.ptr, initializer.length);
         return cast(Object) p;
@@ -282,16 +287,16 @@ static if (OVERRIDE_MEMALLOC)
                 if (mem.isGCEnabled)
                     return cast(Object) allocClass(ci);
 
-            return cast(Object) allocmemory(ci.initializer.length);
+            return cast(Object) allocmemoryNoFree(ci.initializer.length);
         }
     }
 
     extern (C) void* _d_newitemT(TypeInfo ti) nothrow
     {
         version (GC)
-            auto p = mem.isGCEnabled ? _d_newitemU(ti) : allocmemory(ti.tsize);
+            auto p = mem.isGCEnabled ? _d_newitemU(ti) : allocmemoryNoFree(ti.tsize);
         else
-            auto p = allocmemory(ti.tsize);
+            auto p = allocmemoryNoFree(ti.tsize);
 
         memset(p, 0, ti.tsize);
         return p;
@@ -300,9 +305,9 @@ static if (OVERRIDE_MEMALLOC)
     extern (C) void* _d_newitemiT(TypeInfo ti) nothrow
     {
         version (GC)
-            auto p = mem.isGCEnabled ? _d_newitemU(ti) : allocmemory(ti.tsize);
+            auto p = mem.isGCEnabled ? _d_newitemU(ti) : allocmemoryNoFree(ti.tsize);
         else
-            auto p = allocmemory(ti.tsize);
+            auto p = allocmemoryNoFree(ti.tsize);
 
         const initializer = ti.initializer;
         memcpy(p, initializer.ptr, initializer.length);

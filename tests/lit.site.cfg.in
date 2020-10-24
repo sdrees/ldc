@@ -33,6 +33,7 @@ config.ldc_host_arch       = "@LLVM_NATIVE_ARCH@"
 config.ldc_with_lld        = @LDC_WITH_LLD@
 config.spirv_enabled       = @LLVM_SPIRV_FOUND@
 config.rt_supports_sanitizers = @RT_SUPPORT_SANITIZERS@
+config.shared_rt_libs_only = "@BUILD_SHARED_LIBS@" == "ON"
 
 config.name = 'LDC'
 
@@ -84,7 +85,7 @@ config.available_features.add("llvm%d" % config.llvm_version)
 plusoneable_llvmversion = config.llvm_version // 10  + config.llvm_version%10
 for version in range(60, plusoneable_llvmversion+1):
     config.available_features.add("atleast_llvm%d0%d" % (version//10, version%10))
-for version in range(plusoneable_llvmversion, 101):
+for version in range(plusoneable_llvmversion, 111):
     config.available_features.add("atmost_llvm%d0%d" % (version//10, version%10))
 
 # Define OS as available feature (Windows, Darwin, Linux)

@@ -101,12 +101,11 @@ bool DIBuilder::mustEmitLocationsDebugInfo() {
 
 DIBuilder::DIBuilder(IRState *const IR)
     : IR(IR), DBuilder(IR->module), CUNode(nullptr),
-      isTargetMSVC(global.params.targetTriple->isWindowsMSVCEnvironment()),
-      isTargetMSVCx64(isTargetMSVC &&
-                      global.params.targetTriple->isArch64Bit()),
+      emitCodeView(!opts::emitDwarfDebugInfo &&
+                   global.params.targetTriple->isWindowsMSVCEnvironment()),
       // like clang, don't emit any column infos for CodeView by default
       // (https://reviews.llvm.org/D23720)
-      emitColumnInfo(opts::getFlagOrDefault(::emitColumnInfo, !isTargetMSVC)) {}
+      emitColumnInfo(opts::getFlagOrDefault(::emitColumnInfo, !emitCodeView)) {}
 
 llvm::LLVMContext &DIBuilder::getContext() { return IR->context(); }
 
@@ -208,7 +207,7 @@ void DIBuilder::SetValue(const Loc &loc, llvm::Value *value,
                                    IR->scopebb());
 }
 
-DIFile DIBuilder::CreateFile(Loc &loc) {
+DIFile DIBuilder::CreateFile(const Loc &loc) {
   const char *filename = loc.filename;
   if (!filename)
     filename = IR->dmodule->srcfile.toChars();
@@ -244,7 +243,7 @@ DIType DIBuilder::CreateBasicType(Type *type) {
     Encoding = DW_ATE_boolean;
     break;
   case Tchar:
-    if (isTargetMSVC) {
+    if (emitCodeView) {
       // VS debugger does not support DW_ATE_UTF for char
       Encoding = DW_ATE_unsigned_char;
       break;
@@ -255,7 +254,7 @@ DIType DIBuilder::CreateBasicType(Type *type) {
     Encoding = DW_ATE_UTF;
     break;
   case Tint8:
-    if (isTargetMSVC) {
+    if (emitCodeView) {
       // VS debugger does not support DW_ATE_signed for 8-bit
       Encoding = DW_ATE_signed_char;
       break;
@@ -268,7 +267,7 @@ DIType DIBuilder::CreateBasicType(Type *type) {
     Encoding = DW_ATE_signed;
     break;
   case Tuns8:
-    if (isTargetMSVC) {
+    if (emitCodeView) {
       // VS debugger does not support DW_ATE_unsigned for 8-bit
       Encoding = DW_ATE_unsigned_char;
       break;
@@ -288,7 +287,7 @@ DIType DIBuilder::CreateBasicType(Type *type) {
   case Timaginary32:
   case Timaginary64:
   case Timaginary80:
-    if (isTargetMSVC) {
+    if (emitCodeView) {
       // DW_ATE_imaginary_float not supported by the LLVM DWARF->CodeView
       // conversion
       Encoding = DW_ATE_float;
@@ -299,7 +298,7 @@ DIType DIBuilder::CreateBasicType(Type *type) {
   case Tcomplex32:
   case Tcomplex64:
   case Tcomplex80:
-    if (isTargetMSVC) {
+    if (emitCodeView) {
       // DW_ATE_complex_float not supported by the LLVM DWARF->CodeView
       // conversion
       return CreateComplexType(t);
@@ -386,14 +385,19 @@ DIType DIBuilder::CreateVectorType(Type *type) {
   // translate void vectors to byte vectors
   if (te->toBasetype()->ty == Tvoid)
     te = Type::tuns8;
-  int64_t Dim = tv->size(Loc()) / te->size(Loc());
-  LLMetadata *subscripts[] = {DBuilder.getOrCreateSubrange(0, Dim)};
+  const auto dim = tv->size(Loc()) / te->size(Loc());
+#if LDC_LLVM_VER >= 1100
+  const auto Dim = llvm::ConstantAsMetadata::get(DtoConstSize_t(dim));
+  auto subscript = DBuilder.getOrCreateSubrange(Dim, nullptr, nullptr, nullptr);
+#else
+  auto subscript = DBuilder.getOrCreateSubrange(0, dim);
+#endif
 
   return DBuilder.createVectorType(
-      getTypeAllocSize(T) * 8,              // size (bits)
-      getABITypeAlign(T) * 8,               // align (bits)
-      CreateTypeDescription(te),            // element type
-      DBuilder.getOrCreateArray(subscripts) // subscripts
+      getTypeAllocSize(T) * 8,               // size (bits)
+      getABITypeAlign(T) * 8,                // align (bits)
+      CreateTypeDescription(te),             // element type
+      DBuilder.getOrCreateArray({subscript}) // subscripts
   );
 }
 
@@ -682,8 +686,14 @@ DIType DIBuilder::CreateSArrayType(Type *type) {
   llvm::SmallVector<LLMetadata *, 8> subscripts;
   while (t->ty == Tsarray) {
     TypeSArray *tsa = static_cast<TypeSArray *>(t);
-    int64_t Count = tsa->dim->toInteger();
-    auto subscript = DBuilder.getOrCreateSubrange(0, Count);
+    const auto count = tsa->dim->toInteger();
+#if LDC_LLVM_VER >= 1100
+    const auto Count = llvm::ConstantAsMetadata::get(DtoConstSize_t(count));
+    const auto subscript =
+        DBuilder.getOrCreateSubrange(Count, nullptr, nullptr, nullptr);
+#else
+    const auto subscript = DBuilder.getOrCreateSubrange(0, count);
+#endif
     subscripts.push_back(subscript);
     t = t->nextOf();
   }
@@ -890,11 +900,22 @@ void DIBuilder::EmitCompileUnit(Module *m) {
   auto producerName =
       std::string("LDC ") + ldc_version + " (LLVM " + llvm_version + ")";
 
-  if (isTargetMSVC)
+  if (emitCodeView) {
     IR->module.addModuleFlag(llvm::Module::Warning, "CodeView", 1);
-  else if (global.params.dwarfVersion > 0)
-    IR->module.addModuleFlag(llvm::Module::Warning, "Dwarf Version",
-                             global.params.dwarfVersion);
+  } else {
+    unsigned dwarfVersion = global.params.dwarfVersion;
+    if (dwarfVersion == 0 &&
+        global.params.targetTriple->isWindowsMSVCEnvironment()) {
+      // clang 10 defaults to v4
+      dwarfVersion = 4;
+    }
+
+    if (dwarfVersion > 0) {
+      IR->module.addModuleFlag(llvm::Module::Warning, "Dwarf Version",
+                               dwarfVersion);
+    }
+  }
+
   // Metadata without a correct version will be stripped by UpgradeDebugInfo.
   IR->module.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
                            llvm::DEBUG_METADATA_VERSION);
@@ -974,7 +995,7 @@ DISubprogram DIBuilder::EmitSubProgram(FuncDeclaration *fd) {
   DIScope scope = nullptr;
   llvm::StringRef name;
   // FIXME: work around apparent LLVM CodeView bug wrt. nested functions
-  if (isTargetMSVC && fd->toParent2()->isFuncDeclaration()) {
+  if (emitCodeView && fd->toParent2()->isFuncDeclaration()) {
     // emit into module & use fully qualified name
     scope = GetCU();
     name = fd->toPrettyChars(true);
@@ -1128,26 +1149,15 @@ void DIBuilder::EmitFuncStart(FuncDeclaration *fd) {
   Logger::println("D to dwarf funcstart");
   LOG_SCOPE;
 
-  assert(static_cast<llvm::MDNode *>(getIrFunc(fd)->diSubprogram) != 0);
+  auto irFunc = getIrFunc(fd);
+  assert(irFunc->diSubprogram);
+  irFunc->getLLVMFunc()->setSubprogram(irFunc->diSubprogram);
+
+  IR->ir->SetCurrentDebugLocation({}); // clear first
   EmitStopPoint(fd->loc);
 }
 
-void DIBuilder::EmitFuncEnd(FuncDeclaration *fd) {
-  if (!mustEmitLocationsDebugInfo())
-    return;
-
-  Logger::println("D to dwarf funcend");
-  LOG_SCOPE;
-
-  auto irFunc = getIrFunc(fd);
-
-  assert(static_cast<llvm::MDNode *>(irFunc->diSubprogram) != 0);
-  EmitStopPoint(fd->endloc);
-
-  irFunc->getLLVMFunc()->setSubprogram(irFunc->diSubprogram);
-}
-
-void DIBuilder::EmitBlockStart(Loc &loc) {
+void DIBuilder::EmitBlockStart(const Loc &loc) {
   if (!mustEmitLocationsDebugInfo())
     return;
 
@@ -1172,7 +1182,7 @@ void DIBuilder::EmitBlockEnd() {
   fn->diLexicalBlocks.pop();
 }
 
-void DIBuilder::EmitStopPoint(Loc &loc) {
+void DIBuilder::EmitStopPoint(const Loc &loc) {
   if (!mustEmitLocationsDebugInfo())
     return;
 
@@ -1181,6 +1191,7 @@ void DIBuilder::EmitStopPoint(Loc &loc) {
   // cannot do this in all cases).
   if (!loc.linnum && IR->ir->getCurrentDebugLocation())
     return;
+
   unsigned linnum = loc.linnum;
   // without proper loc use the line of the enclosing symbol that has line
   // number debug info
@@ -1194,10 +1205,7 @@ void DIBuilder::EmitStopPoint(Loc &loc) {
   LOG_SCOPE;
   IR->ir->SetCurrentDebugLocation(
       llvm::DebugLoc::get(linnum, col, GetCurrentScope()));
-  currentLoc = loc;
 }
-
-Loc DIBuilder::GetCurrentLoc() const { return currentLoc; }
 
 void DIBuilder::EmitValue(llvm::Value *val, VarDeclaration *vd) {
   auto sub = IR->func()->variableMap.find(vd);
@@ -1241,7 +1249,8 @@ void DIBuilder::EmitLocalVariable(llvm::Value *ll, VarDeclaration *vd,
 
   // For MSVC x64, some by-value parameters need to be declared as DI locals to
   // work around garbage for both cdb and VS debuggers.
-  if (isParameter && !forceAsLocal && isTargetMSVCx64 && !isRefOrOut) {
+  if (emitCodeView && isParameter && !forceAsLocal && !isRefOrOut &&
+      global.params.targetTriple->isArch64Bit()) {
     // 1) params rewritten by IndirectByvalRewrite
     if (isaArgument(ll) && addr.empty()) {
       forceAsLocal = true;

@@ -13,7 +13,7 @@ env:
   global:
     - secure: RQ6gpJFPBDGVlnz+ZzSgeMpkcnvcA/7Lzyj/r06fMFR5iOz2cYaImCekNRw2PlhYQ+0FCQ119TLMKNOa7OUu6XxUp5LZtq7pSB6QLe3RB3YysFsosNPlY/wyyRsrW9ICEbDP/X8kPcfrDtOPGS/dGIwgeo0+R4Yl0OLDK9GrExEY45bWgvuLqoWDO89pi31kBk5LG5MAYhHZ0UTdboi5A2GRT0T8M0kr53jBRka8FGkbncXfHp9+/6IjTVJoUduRkdsk0A9RN1KRoao6rtrBNNvwIStc6zxJSOHszoaTp/K/ucGC4InZl/9GHPS/Y78SGKn7YJv3tGmcGzqAxrVaXQ==
   matrix:
-    - LLVM_VERSION=10.0.1
+    - LLVM_VERSION=11.0.0
       HOST_LDC_VERSION=1.22.0
       EXTRA_CMAKE_FLAGS="-DBUILD_LTO_LIBS=ON -DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -DJITRT_EXTRA_LDFLAGS=-static-libstdc++ -DLDC_INSTALL_LTOPLUGIN=ON -DLDC_INSTALL_LLVM_RUNTIME_LIBS=ON -DLDC_INSTALL_LLVM_RUNTIME_LIBS_ARCH=aarch64"
 
@@ -57,11 +57,12 @@ build:
         -DD_COMPILER=$PWD/../host-ldc/bin/ldmd2 \
         -DBUILD_SHARED_LIBS=OFF \
         -DCOMPILE_ALL_D_FILES_AT_ONCE=OFF \
-        -DADDITIONAL_DEFAULT_LDC_SWITCHES=' "-linker=bfd",'
+        -DADDITIONAL_DEFAULT_LDC_SWITCHES=' "-linker=bfd",' \
+        -DLDC_LINK_MANUALLY=OFF
     - ninja -j32
     - bin/ldc2 --version
     - cd ..
-    # Build LDC & LDC D unittests
+    # Build LDC & LDC D unittests & defaultlib unittest runners
     - |
       set -x
       installDir=$PWD/install
@@ -75,12 +76,14 @@ build:
         -DINCLUDE_INSTALL_DIR=$installDir/import \
         -DCOMPILE_ALL_D_FILES_AT_ONCE=OFF \
         -DADDITIONAL_DEFAULT_LDC_SWITCHES=' "-linker=bfd",' \
+        -DLDC_LINK_MANUALLY=OFF \
         $EXTRA_CMAKE_FLAGS
       set +x
-    - ninja -j32 all ldc2-unittest
+    - |
+      # Work around out-of-memory errors - retry once with halved jobs
+      targets='all ldc2-unittest all-test-runners'
+      ninja -j32 $targets || ninja -j16 $targets
     - bin/ldc2 --version
-    # Build defaultlib unittest runners
-    - ninja -j16 all-test-runners
     # Run LDC D unittests
     - ctest --output-on-failure -R "ldc2-unittest"
     # FIXME: all gdb tests fail (might have to do with the Shippable/Packet setup) and are disabled
