@@ -32,16 +32,17 @@ matrix:
       d: dmd-beta
       env: LLVM_VERSION=6.0.1 OPTS="-DLIB_SUFFIX=64 -DLDC_LINK_MANUALLY=ON"
     - os: osx
-      osx_image: xcode10.3
+      osx_image: xcode11.3
       d: dmd-beta
       env: LLVM_VERSION=10.0.0 OPTS="-DBUILD_SHARED_LIBS=ON -DRT_SUPPORT_SANITIZERS=ON -DLDC_LINK_MANUALLY=ON"
     - os: osx
-      osx_image: xcode10.3
+      osx_image: xcode11.3
       d: ldc-beta
       env: LLVM_VERSION=7.0.0 OPTS="-DBUILD_SHARED_LIBS=OFF"
 
 cache:
   directories:
+    - llvm-11.0.0
     - llvm-10.0.0
     - llvm-9.0.0
     - llvm-8.0.0
@@ -93,7 +94,7 @@ install:
       sudo python get-pip.py
       rm get-pip.py
       # Download & extract Ninja & add to PATH
-      wget -O ninja-mac.zip https://github.com/ninja-build/ninja/releases/download/v1.10.0/ninja-mac.zip
+      wget -O ninja-mac.zip https://github.com/ninja-build/ninja/releases/download/v1.10.1/ninja-mac.zip
       mkdir ninja
       tar -xf ninja-mac.zip -C ninja
       rm ninja-mac.zip
@@ -106,7 +107,7 @@ install:
     else
       pip install --user lit
     fi
-  - python -c "import lit; lit.main();" --version . | head -n 1
+  - python -c "import lit.main; lit.main.main();" --version . | head -n 1
 
 script:
   - unset LD_LIBRARY_PATH
@@ -166,9 +167,6 @@ script:
   - |
     if [ "$TRAVIS_CPU_ARCH" = "arm64" ]; then
       DMD_TESTSUITE_MAKE_ARGS="-j${PARALLELISM:-3} GDB_FLAGS=OFF" ctest -V -R "dmd-testsuite"
-    elif [ "$TRAVIS_OS_NAME" = "osx" ]; then
-      # dmd-testsuite-debug only to reduce time-outs
-      DMD_TESTSUITE_MAKE_ARGS=-j${PARALLELISM:-3} ctest -V -R "build-run-dmd-testsuite|dmd-testsuite-debug"
     else
       DMD_TESTSUITE_MAKE_ARGS=-j${PARALLELISM:-3} ctest -V -R "dmd-testsuite"
     fi

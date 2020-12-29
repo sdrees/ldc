@@ -23,6 +23,7 @@
 #include "dmd/target.h"
 #include "dmd/template.h"
 #include "driver/cl_options_instrumentation.h"
+#include "driver/timetrace.h"
 #include "gen/abi.h"
 #include "gen/arrays.h"
 #include "gen/functions.h"
@@ -585,6 +586,8 @@ void registerModuleInfo(Module *m) {
 }
 
 void codegenModule(IRState *irs, Module *m) {
+  TimeTraceScope timeScope("Generate IR", llvm::StringRef(m->toChars()));
+
   assert(!irs->dmodule &&
          "irs->module not null, codegen already in progress?!");
   irs->dmodule = m;
@@ -608,7 +611,7 @@ void codegenModule(IRState *irs, Module *m) {
 
   // process module members
   // NOTE: m->members may grow during codegen
-  for (unsigned k = 0; k < m->members->length; k++) {
+  for (d_size_t k = 0; k < m->members->length; k++) {
     Dsymbol *dsym = (*m->members)[k];
     assert(dsym);
     Declaration_codegen(dsym);

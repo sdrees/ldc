@@ -92,21 +92,22 @@ public:
       return;
     }
 
-    if (decl->members && decl->symtab) {
-      DtoResolveClass(decl);
-      decl->ir->setDefined();
+    if (!(decl->members && decl->symtab)) {
+      return;
+    }
 
-      // Emit any members (e.g. final functions).
-      for (auto m : *decl->members) {
-        m->accept(this);
-      }
+    DtoResolveClass(decl);
+    decl->ir->setDefined();
 
-      // Emit TypeInfo.
-      IrClass *ir = getIrAggr(decl);
-      if (!ir->suppressTypeInfo() && !isSpeculativeType(decl->type)) {
-        llvm::GlobalVariable *interfaceZ = ir->getClassInfoSymbol();
-        defineGlobal(interfaceZ, ir->getClassInfoInit(), decl);
-      }
+    // Emit any members (e.g. final functions).
+    for (auto m : *decl->members) {
+      m->accept(this);
+    }
+
+    // Emit TypeInfo.
+    IrClass *ir = getIrAggr(decl);
+    if (!ir->suppressTypeInfo()) {
+      ir->getClassInfoSymbol(/*define=*/true);
     }
   }
 
@@ -128,6 +129,7 @@ public:
     }
 
     if (!(decl->members && decl->symtab)) {
+      // nothing to do for opaque structs anymore
       return;
     }
 
@@ -145,17 +147,12 @@ public:
 
       // Define the __initZ symbol.
       if (!decl->zeroInit) {
-        auto &initZ = ir->getInitSymbol();
-        auto initGlobal = llvm::cast<LLGlobalVariable>(initZ);
-        initZ = irs->setGlobalVarInitializer(initGlobal, ir->getDefaultInit());
-        setLinkageAndVisibility(decl, initGlobal);
+        ir->getInitSymbol(/*define=*/true);
       }
 
-      // emit typeinfo
+      // Emit special __xopEquals/__xopCmp/__xtoHash member functions required
+      // for the TypeInfo.
       if (!ir->suppressTypeInfo()) {
-        DtoTypeInfoOf(decl->type, /*base=*/false);
-
-        // Emit __xopEquals/__xopCmp/__xtoHash.
         if (decl->xeq && decl->xeq != decl->xerreq) {
           decl->xeq->accept(this);
         }
@@ -165,6 +162,8 @@ public:
         if (decl->xhash) {
           decl->xhash->accept(this);
         }
+
+        // the TypeInfo itself is emitted into each referencing CU
       }
     }
   }
@@ -188,31 +187,28 @@ public:
       return;
     }
 
-    if (decl->members && decl->symtab) {
-      DtoResolveClass(decl);
-      decl->ir->setDefined();
+    if (!(decl->members && decl->symtab)) {
+      return;
+    }
 
-      for (auto m : *decl->members) {
-        m->accept(this);
-      }
+    DtoResolveClass(decl);
+    decl->ir->setDefined();
 
-      IrClass *ir = getIrAggr(decl);
+    for (auto m : *decl->members) {
+      m->accept(this);
+    }
 
-      auto &initZ = ir->getInitSymbol();
-      auto initGlobal = llvm::cast<LLGlobalVariable>(initZ);
-      initZ = irs->setGlobalVarInitializer(initGlobal, ir->getDefaultInit());
-      setLinkageAndVisibility(decl, initGlobal);
+    IrClass *ir = getIrAggr(decl);
 
-      llvm::GlobalVariable *vtbl = ir->getVtblSymbol();
-      defineGlobal(vtbl, ir->getVtblInit(), decl);
+    ir->getInitSymbol(/*define=*/true);
 
-      ir->defineInterfaceVtbls();
+    ir->getVtblSymbol(/*define*/true);
 
-      // Emit TypeInfo.
-      if (!ir->suppressTypeInfo() && !isSpeculativeType(decl->type)) {
-        llvm::GlobalVariable *classZ = ir->getClassInfoSymbol();
-        defineGlobal(classZ, ir->getClassInfoInit(), decl);
-      }
+    ir->defineInterfaceVtbls();
+
+    // Emit TypeInfo.
+    if (!ir->suppressTypeInfo()) {
+      ir->getClassInfoSymbol(/*define=*/true);
     }
   }
 
@@ -273,57 +269,13 @@ public:
              "manifest constant being codegen'd!");
       assert(!irs->dcomputetarget);
 
-      IrGlobal *irGlobal = getIrGlobal(decl);
-      LLGlobalVariable *gvar = llvm::cast<LLGlobalVariable>(irGlobal->value);
-      assert(gvar && "DtoResolveVariable should have created value");
-
-      if (global.params.vtls && gvar->isThreadLocal() &&
-          !(decl->storage_class & STCtemp)) {
-        const char *p = decl->loc.toChars();
-        message("%s: `%s` is thread local", p, decl->toChars());
-      }
-
       // Check if we are defining or just declaring the global in this module.
       // If we reach here during codegen of an available_externally function,
       // new variable declarations should stay external and therefore must not
       // have an initializer.
-      if (!(decl->storage_class & STCextern) && !decl->inNonRoot()) {
-        // Build the initializer. Might use irGlobal->value!
-        LLConstant *initVal =
-            DtoConstInitializer(decl->loc, decl->type, decl->_init);
+      bool define = !(decl->storage_class & STCextern) && !decl->inNonRoot();
 
-        // Cache it.
-        assert(!irGlobal->constInit);
-        irGlobal->constInit = initVal;
-
-        // Set the initializer, swapping out the variable if the types do not
-        // match.
-        irGlobal->value = irs->setGlobalVarInitializer(gvar, initVal);
-
-        // Finalize linkage & DLL storage class.
-        const auto lwc = DtoLinkage(decl);
-        setLinkage(lwc, gvar);
-        if (gvar->hasDLLImportStorageClass()) {
-          gvar->setDLLStorageClass(LLGlobalValue::DLLExportStorageClass);
-        }
-
-        // Hide non-exported symbols
-        if (opts::defaultToHiddenVisibility && !decl->isExport()) {
-          gvar->setVisibility(LLGlobalValue::HiddenVisibility);
-        }
-
-        // Also set up the debug info.
-        irs->DBuilder.EmitGlobalVariable(gvar, decl);
-      }
-
-      // If this global is used from a naked function, we need to create an
-      // artificial "use" for it, or it could be removed by the optimizer if
-      // the only reference to it is in inline asm.
-      if (irGlobal->nakedUse) {
-        irs->usedArray.push_back(gvar);
-      }
-
-      IF_LOG Logger::cout() << *gvar << '\n';
+      getIrGlobal(decl)->getValue(define);
     }
   }
 
@@ -372,7 +324,7 @@ public:
     }
 
     // FIXME: This is #673 all over again.
-    if (!decl->needsCodegen()) {
+    if (!global.params.linkonceTemplates && !decl->needsCodegen()) {
       Logger::println("Does not need codegen, skipping.");
       return;
     }
@@ -503,8 +455,7 @@ public:
   //////////////////////////////////////////////////////////////////////////
 
   void visit(TypeInfoDeclaration *decl) override {
-    if (!irs->dcomputetarget)
-      TypeInfoDeclaration_codegen(decl);
+    llvm_unreachable("Should be emitted from codegen layer only");
   }
 };
 

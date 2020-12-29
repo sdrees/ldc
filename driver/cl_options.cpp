@@ -487,8 +487,9 @@ cl::opt<uint32_t, true> hashThreshold(
     "hash-threshold", cl::ZeroOrMore, cl::location(global.params.hashThreshold),
     cl::desc("Hash symbol names longer than this threshold (experimental)"));
 
-cl::opt<bool> linkonceTemplates(
+static cl::opt<bool, true> linkonceTemplates(
     "linkonce-templates", cl::ZeroOrMore,
+    cl::location(global.params.linkonceTemplates),
     cl::desc(
         "Use linkonce_odr linkage for template symbols instead of weak_odr"));
 
@@ -574,6 +575,20 @@ static cl::opt<DummyDataType, false, CoverageParser> coverageAnalysis(
     cl::desc("Compile-in code coverage analysis and .lst file generation\n"
              "Use -cov=<n> for n% minimum required coverage\n"
              "Use -cov=ctfe to include code executed during CTFE"));
+
+// Compilation time tracing options
+cl::opt<bool> fTimeTrace(
+    "ftime-trace", cl::ZeroOrMore,
+    cl::desc("Turn on time profiler. Generates JSON file "
+             "based on the output filename (also see --ftime-trace-file)."));
+cl::opt<unsigned> fTimeTraceGranularity(
+    "ftime-trace-granularity", cl::ZeroOrMore,
+    cl::desc(
+        "Minimum time granularity (in microseconds) traced by time profiler"));
+cl::opt<std::string>
+fTimeTraceFile("ftime-trace-file",
+               cl::desc("Specify time trace file destination"),
+               cl::value_desc("filename"));
 
 cl::opt<LTOKind> ltoMode(
     "flto", cl::ZeroOrMore, cl::desc("Set LTO mode, requires linker support"),

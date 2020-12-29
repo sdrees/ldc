@@ -35,6 +35,7 @@
 #include "driver/linker.h"
 #include "driver/plugins.h"
 #include "driver/targetmachine.h"
+#include "driver/timetrace.h"
 #include "gen/abi.h"
 #include "gen/cl_helpers.h"
 #include "gen/irstate.h"
@@ -429,8 +430,9 @@ void parseCommandLine(Strings &sourceFiles) {
   global.params.output_mlir = opts::output_mlir ? OUTPUTFLAGset : OUTPUTFLAGno;
   global.params.output_s = opts::output_s ? OUTPUTFLAGset : OUTPUTFLAGno;
 
-  templateLinkage = opts::linkonceTemplates ? LLGlobalValue::LinkOnceODRLinkage
-                                            : LLGlobalValue::WeakODRLinkage;
+  templateLinkage = global.params.linkonceTemplates
+                        ? LLGlobalValue::LinkOnceODRLinkage
+                        : LLGlobalValue::WeakODRLinkage;
 
   if (global.params.run || !runargs.empty()) {
     // FIXME: how to properly detect the presence of a PositionalEatsArgs
@@ -830,7 +832,9 @@ void registerPredefinedTargetVersions() {
       VersionCondition::addPredefinedGlobalIdent("Android");
     } else {
       llvm::StringRef osName = triple.getOSName();
-      if (!osName.empty() && osName != "unknown" && osName != "none") {
+      if (osName.empty() || osName == "unknown" || osName == "none") {
+        VersionCondition::addPredefinedGlobalIdent("FreeStanding");
+      } else {
         warning(Loc(), "unknown target OS: %s", osName.str().c_str());
       }
     }
@@ -986,6 +990,8 @@ int cppmain() {
     fatal();
   }
 
+  initializeTimeTracer();
+
   // Set up the TargetMachine.
   const auto arch = getArchStr();
   if ((m32bits || m64bits) && (!arch.empty() || !mTargetTriple.empty())) {
@@ -1072,13 +1078,26 @@ int cppmain() {
 
   loadAllPlugins();
 
-  Strings libmodules;
-  return mars_mainBody(global.params, files, libmodules);
+  int status;
+  {
+    TimeTraceScope timeScope("ExecuteCompiler");
+    Strings libmodules;
+    status = mars_mainBody(global.params, files, libmodules);
+  }
+
+  writeTimeTraceProfile();
+  deinitializeTimeTracer();
+
+  llvm::llvm_shutdown();
+
+  return status;
 }
 
 void codegenModules(Modules &modules) {
   // Generate one or more object/IR/bitcode files/dcompute kernels.
   if (global.params.obj && !modules.empty()) {
+    TimeTraceScope timeScope("Codegen all modules");
+
 #if LDC_MLIR_ENABLED
     mlir::MLIRContext mlircontext;
     ldc::CodeGenerator cg(getGlobalContext(), mlircontext,
@@ -1108,6 +1127,7 @@ void codegenModules(Modules &modules) {
       const auto atCompute = hasComputeAttr(m);
       if (atCompute == DComputeCompileFor::hostOnly ||
           atCompute == DComputeCompileFor::hostAndDevice) {
+        TimeTraceScope timeScope(("Codegen module " + llvm::SmallString<20>(m->toChars())).str());
 #if LDC_MLIR_ENABLED
         if (global.params.output_mlir == OUTPUTFLAGset)
           cg.emitMLIR(m);
@@ -1133,8 +1153,11 @@ void codegenModules(Modules &modules) {
     }
 
     if (!computeModules.empty()) {
-      for (auto &mod : computeModules)
+      TimeTraceScope timeScope("Codegen DCompute device modules");
+      for (auto &mod : computeModules) {
+        TimeTraceScope timeScope(("Codegen DCompute device module " + llvm::SmallString<20>(mod->toChars())).str());
         dccg.emit(mod);
+      }
     }
     dccg.writeModules();
 
@@ -1143,8 +1166,10 @@ void codegenModules(Modules &modules) {
       global.params.link = false;
   }
 
-  cache::pruneCache();
+  {
+    TimeTraceScope timeScope("Prune object file cache");
+    cache::pruneCache();
+  }
 
   freeRuntime();
-  llvm::llvm_shutdown();
 }

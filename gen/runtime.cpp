@@ -105,10 +105,10 @@ static void checkForImplicitGCCall(const Loc &loc, const char *name) {
 ////////////////////////////////////////////////////////////////////////////////
 
 bool initRuntime() {
-  Logger::println("*** Initializing D runtime declarations ***");
-  LOG_SCOPE;
-
   if (!M) {
+    Logger::println("*** Initializing D runtime declarations ***");
+    LOG_SCOPE;
+
     buildRuntimeModule();
   }
 
@@ -258,9 +258,8 @@ struct LazyFunctionDeclarer {
     // the call to DtoType performs many actions such as rewriting the function
     // type and storing it in dty
     auto llfunctype = llvm::cast<llvm::FunctionType>(DtoType(dty));
-    assert(dty->ctype);
-    auto attrs =
-        dty->ctype->getIrFuncTy().getParamAttrs(gABI->passThisBeforeSret(dty));
+    auto attrs = getIrType(dty)->getIrFuncTy().getParamAttrs(
+        gABI->passThisBeforeSret(dty));
     attrs.merge(attributes);
 
     for (auto fname : mangledFunctionNames) {
@@ -488,7 +487,7 @@ static void buildRuntimeModule() {
   Type *wstringTy = Type::twchar->arrayOf();
   Type *dstringTy = Type::tdchar->arrayOf();
 
-  // The AA type is a struct that only contains a ptr
+  // LDC's AA type is rt.aaA.Impl*; use void* for the prototypes
   Type *aaTy = voidPtrTy;
 
   //////////////////////////////////////////////////////////////////////////////

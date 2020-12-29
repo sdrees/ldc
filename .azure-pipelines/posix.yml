@@ -14,7 +14,7 @@ steps:
     if [ "$CI_OS" = "osx" ]; then
       sudo xcode-select --switch /Applications/Xcode_12.2.app/Contents/Developer
       # Download & extract Ninja
-      curl -L -o ninja-mac.zip https://github.com/ninja-build/ninja/releases/download/v1.10.0/ninja-mac.zip
+      curl -L -o ninja-mac.zip https://github.com/ninja-build/ninja/releases/download/v1.10.1/ninja-mac.zip
       mkdir ninja
       tar -xf ninja-mac.zip -C ninja
     else
@@ -36,7 +36,7 @@ steps:
     curl -OL https://bootstrap.pypa.io/get-pip.py
     python get-pip.py --user
     python -m pip install --user lit
-    python -c "import lit; lit.main();" --version . | head -n 1
+    python -c "import lit.main; lit.main.main();" --version . | head -n 1
     # Download & extract host LDC
     HOST_OS="$CI_OS"
     if [ "$CI_OS" = "android" ]; then HOST_OS="linux"; fi
@@ -437,6 +437,7 @@ steps:
     cd ..
     git clone --recursive https://github.com/dlang/tools.git dlang-tools
     cd dlang-tools
+    git checkout "$(cat $BUILD_SOURCESDIRECTORY/packaging/dlang-tools_version)"
     mkdir bin
     $DMD -w -de -dip1000 rdmd.d -of=bin/rdmd
     $DMD -w -de -dip1000 ddemangle.d -of=bin/ddemangle
@@ -444,7 +445,7 @@ steps:
     cp bin/{rdmd,ddemangle,dustmite} ../installed/bin
   displayName: Build & copy dlang tools
 
-# Pack & publish artifact
+# Pack & publish artifact(s)
 - script: |
     set -ex
     cd ..

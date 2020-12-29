@@ -587,7 +587,7 @@ public:
 
   //////////////////////////////////////////////////////////////////////////////
 
-  using BinOpFunc = DValue *(Loc &, Type *, DValue *, Expression *, bool);
+  using BinOpFunc = DValue *(const Loc &, Type *, DValue *, Expression *, bool);
 
   static Expression *getLValExp(Expression *e) {
     e = skipOverCasts(e);
@@ -2402,9 +2402,9 @@ public:
       llvm::Function *func =
           getRuntimeFunction(e->loc, gIR->module, "_d_assocarrayliteralTX");
       LLFunctionType *funcTy = func->getFunctionType();
-      LLValue *aaTypeInfo =
-          DtoBitCast(DtoTypeInfoOf(stripModifiers(aatype), /*base=*/false),
-                     DtoType(getAssociativeArrayTypeInfoType()));
+      LLValue *aaTypeInfo = DtoBitCast(
+          DtoTypeInfoOf(e->loc, stripModifiers(aatype), /*base=*/false),
+          DtoType(getAssociativeArrayTypeInfoType()));
 
       LLConstant *idxs[2] = {DtoConstUint(0), DtoConstUint(0)};
 
@@ -2669,8 +2669,8 @@ public:
 
   void visit(TypeidExp *e) override {
     if (Type *t = isType(e->obj)) {
-      result = DtoSymbolAddress(
-          e->loc, e->type, getOrCreateTypeInfoDeclaration(e->loc, t, nullptr));
+      result = DtoSymbolAddress(e->loc, e->type,
+                                getOrCreateTypeInfoDeclaration(e->loc, t));
       return;
     }
     if (Expression *ex = isExpression(e->obj)) {

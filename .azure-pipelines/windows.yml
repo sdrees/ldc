@@ -2,14 +2,18 @@
 # environment variables aren't persisted across steps.
 
 steps:
+
 - script: |
     :: Use Windows CRLF line endings for checked-out text files
     git config --global core.autocrlf true
     set
   displayName: Print environment variables
+
 - checkout: self
   submodules: true
   fetchDepth: 50
+
+# Prerequisites
 - script: |
     echo on
     cd ..
@@ -28,14 +32,14 @@ steps:
     )
     cd ..
     :: Download & extract Ninja
-    curl -L -o ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.10.0/ninja-win.zip 2>&1
+    curl -L -o ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.10.1/ninja-win.zip 2>&1
     mkdir ninja
     cd ninja
     7z x ../ninja.zip > nul
     cd ..
     :: Install lit
     python -m pip install --user lit
-    python -c "import lit; lit.main();" --version . | head -n 1
+    python -c "import lit.main; lit.main.main();" --version . | head -n 1
     :: Download & extract host LDC
     curl -L -o ldc2.7z http://github.com/ldc-developers/ldc/releases/download/v%HOST_LDC_VERSION%/ldc2-%HOST_LDC_VERSION%-windows-multilib.7z 2>&1
     7z x ldc2.7z > nul
@@ -65,12 +69,13 @@ steps:
     curl -L -o clang.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-%CLANG_VERSION%/LLVM-%CLANG_VERSION%-win64.exe 2>&1
     clang.exe /S
   displayName: Install prerequisites
+
+# Build bootstrap LDC
 - script: |
     echo on
     cd ..
-    :: LLVM bin dir in PATH required for lld-link.exe
-    :: git's usr/bin required to make GNU find precede MS one in C:\Windows\System32
-    set PATH=%CD%\llvm\bin;C:\Program Files\LLVM\bin;%CD%\ninja;%CD%\gnu;C:\Program Files\Git\usr\bin;%PATH%
+    :: git's usr/bin required to make GNU `find` precede MS one in C:\Windows\System32
+    set PATH=C:\Program Files\LLVM\bin;%CD%\ninja;%CD%\gnu;C:\Program Files\Git\usr\bin;%PATH%
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
     echo on
     cmake --version
@@ -82,10 +87,12 @@ steps:
     ninja -j4 || exit /b
     bin\ldc2 --version
   displayName: Build bootstrap LDC
+
+# Build
 - script: |
     echo on
     cd ..
-    set PATH=%CD%\llvm\bin;C:\Program Files\LLVM\bin;%CD%\ninja;%CD%\gnu;C:\Program Files\Git\usr\bin;%PATH%
+    set PATH=C:\Program Files\LLVM\bin;%CD%\ninja;%CD%\gnu;C:\Program Files\Git\usr\bin;%PATH%
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
     echo on
     set INSTALL_DIR=%CD%/install
@@ -95,6 +102,8 @@ steps:
     ninja -j4 all ldc2-unittest all-test-runners || exit /b
     bin\ldc2 --version
   displayName: Build LDC & LDC D unittests & defaultlib unittest runners
+
+# Tests
 - script: |
     cd ..
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
@@ -104,7 +113,6 @@ steps:
   condition: succeededOrFailed()
 - script: |
     cd ..
-    set PATH=%CD%\llvm\bin;%PATH%
     :: strings_cdb has regressed for 32-bit starting with the VS 2019 v16.6.0 Azure Image (worked fine until v16.5.4)
     :: it also works fine on my box with the same v16.7.2...
     if "%MODEL%" == "32" ( del %BUILD_SOURCESDIRECTORY%\tests\debuginfo\strings_cdb.d)
@@ -132,6 +140,8 @@ steps:
     ctest -j4 --output-on-failure -E "dmd-testsuite|lit-tests|ldc2-unittest"
   displayName: Run defaultlib unittests & druntime stand-alone tests
   condition: succeededOrFailed()
+
+# Install, make portable and copy curl & MinGW-w64-based libs
 - script: |
     cd ..
     set PATH=%CD%\ninja;%PATH%
@@ -149,13 +159,14 @@ steps:
   displayName: Install LDC, make portable & copy curl
 - script: |
     cd ..
-    cp llvm/bin/lld-link.exe installed/bin
-    curl -L -o mingw-w64-libs.7z https://github.com/ldc-developers/mingw-w64-libs/releases/download/v7.0.0/mingw-w64-libs-v7.0.0.7z 2>&1
+    curl -L -o mingw-w64-libs.7z https://github.com/ldc-developers/mingw-w64-libs/releases/download/v8.0.0/mingw-w64-libs-v8.0.0.7z 2>&1
     mkdir mingw-w64-libs
     cd mingw-w64-libs
     7z x ../mingw-w64-libs.7z > nul
     cp -r lib%MODEL% ../installed/lib/mingw
-  displayName: Copy lld-link.exe & MinGW-w64-based libs
+  displayName: Copy MinGW-w64-based libs
+
+# Integration tests
 - script: |
     cd ..
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
@@ -172,6 +183,8 @@ steps:
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
     installed\bin\ldc2 -enable-dynamic-compile -run %BUILD_SOURCESDIRECTORY%/tests/dynamiccompile/array.d
   displayName: Run dynamic-compile integration test
+
+# Add dub & dlang tools
 - script: |
     cd ..
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
@@ -189,11 +202,14 @@ steps:
     set DMD=%CD%\installed\bin\ldmd2
     git clone --recursive https://github.com/dlang/tools.git dlang-tools 2>&1
     cd dlang-tools
+    powershell -c "git checkout \"$(cat %BUILD_SOURCESDIRECTORY%/packaging/dlang-tools_version -Raw)\"" 2>&1
     %DMD% -w -de -dip1000 rdmd.d || exit /b
     %DMD% -w -de -dip1000 ddemangle.d || exit /b
     %DMD% -w -de -dip1000 DustMite\dustmite.d DustMite\splitter.d || exit /b
     cp *.exe ../installed/bin
   displayName: Build & copy dlang tools
+
+# Pack & publish artifact
 - script: |
     cd ..
     if "%BUILD_SOURCEBRANCH:~0,10%" == "refs/tags/" (

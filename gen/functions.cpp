@@ -25,6 +25,7 @@
 #include "driver/cl_options.h"
 #include "driver/cl_options_instrumentation.h"
 #include "driver/cl_options_sanitizers.h"
+#include "driver/timetrace.h"
 #include "gen/abi.h"
 #include "gen/arrays.h"
 #include "gen/classes.h"
@@ -575,10 +576,26 @@ void DtoDeclareFunction(FuncDeclaration *fdecl, const bool willDefine) {
   // Check if fdecl should be defined too for cross-module inlining.
   // If true, semantic is fully done for fdecl which is needed for some code
   // below (e.g. code that uses fdecl->vthis).
-  const bool defineAtEnd = !willDefine && defineAsExternallyAvailable(*fdecl);
-  if (defineAtEnd) {
-    IF_LOG Logger::println(
-        "Function is an externally_available inline candidate.");
+  bool defineAtEnd = false;
+  bool defineAsAvailableExternally = false;
+  if (willDefine) {
+    // will be defined anyway after declaration
+  } else if (defineOnDeclare(fdecl)) {
+    Logger::println("Function is inside a linkonce_odr template, will be "
+                    "defined after declaration.");
+    if (fdecl->semanticRun < PASSsemantic3done) {
+      // this can e.g. happen for special __xtoHash member functions
+      Logger::println("Function hasn't had sema3 run yet, running it now.");
+      const bool semaSuccess = fdecl->functionSemantic3();
+      assert(semaSuccess);
+      Module::runDeferredSemantic3();
+    }
+    defineAtEnd = true;
+  } else if (defineAsExternallyAvailable(*fdecl)) {
+    Logger::println("Function is an externally_available inline candidate, "
+                    "will be defined after declaration.");
+    defineAtEnd = true;
+    defineAsAvailableExternally = true;
   }
 
   // get TypeFunction*
@@ -768,9 +785,8 @@ void DtoDeclareFunction(FuncDeclaration *fdecl, const bool willDefine) {
 
   // Now that this function is declared, also define it if needed.
   if (defineAtEnd) {
-    IF_LOG Logger::println(
-        "Function is an externally_available inline candidate: define it now.");
-    DtoDefineFunction(fdecl, /*linkageAvailableExternally=*/true);
+    IF_LOG Logger::println("Define function after declaration:");
+    DtoDefineFunction(fdecl, defineAsAvailableExternally);
   }
 }
 
@@ -971,6 +987,14 @@ void emulateWeakAnyLinkageForMSVC(LLFunction *func, LINK linkage) {
 } // anonymous namespace
 
 void DtoDefineFunction(FuncDeclaration *fd, bool linkageAvailableExternally) {
+  TimeTraceScope timeScope(
+      ("Codegen func " + llvm::SmallString<40>(fd->toChars())).str(), [fd]() {
+        std::string detail = fd->toPrettyChars();
+        detail += ", loc: ";
+        detail += fd->loc.toChars();
+        return detail;
+      });
+
   IF_LOG Logger::println("DtoDefineFunction(%s): %s", fd->toPrettyChars(),
                          fd->loc.toChars());
   LOG_SCOPE;
@@ -1038,7 +1062,7 @@ void DtoDefineFunction(FuncDeclaration *fd, bool linkageAvailableExternally) {
     }
   }
 
-  if (!linkageAvailableExternally && !alreadyOrWillBeDefined(*fd)) {
+  if (!linkageAvailableExternally && skipCodegen(*fd)) {
     IF_LOG Logger::println("Skipping '%s'.", fd->toPrettyChars());
     return;
   }
@@ -1366,23 +1390,4 @@ DValue *DtoArgument(Parameter *fnarg, Expression *argexp) {
   }
 
   return arg;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int binary(const char *p, const char **tab, int high) {
-  int i = 0, j = high, k, l;
-  do {
-    k = (i + j) / 2;
-    l = strcmp(p, tab[k]);
-    if (!l) {
-      return k;
-    }
-    if (l < 0) {
-      j = k;
-    } else {
-      i = k + 1;
-    }
-  } while (i != j);
-  return -1;
 }

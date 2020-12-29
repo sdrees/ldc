@@ -26,35 +26,42 @@
 namespace {
 LLStructType* getTypeInfoStructMemType() {
   Type *t = getStructTypeInfoType();
-  DtoType(t);
-  IrTypeClass *tc = t->ctype->isClass();
+  IrTypeClass *tc = getIrType(t, true)->isClass();
   assert(tc && "invalid TypeInfo_Struct type");
 
   return llvm::cast<LLStructType>(tc->getMemoryLLType());
 }
 }
 
-LLGlobalVariable* IrStruct::getTypeInfoSymbol() {
-  if (typeInfo) {
-    return typeInfo;
+LLGlobalVariable* IrStruct::getTypeInfoSymbol(bool define) {
+  if (!typeInfo) {
+    OutBuffer mangledName;
+    mangledName.writestring("TypeInfo_S");
+    mangleToBuffer(aggrdecl, &mangledName);
+    const auto length = mangledName.length();
+    mangledName.prependstring(("_D" + std::to_string(length)).c_str());
+    mangledName.writestring("6__initZ");
+
+    const auto irMangle = getIRMangledVarName(mangledName.peekChars(), LINKd);
+
+    // We need to keep the symbol mutable as the type is not declared as
+    // immutable on the D side, and e.g. synchronized() can be used on the
+    // implicit monitor.
+    typeInfo =
+        declareGlobal(aggrdecl->loc, gIR->module, getTypeInfoStructMemType(),
+                      irMangle, /*isConstant=*/false);
+
+    emitTypeInfoMetadata(typeInfo, aggrdecl->type);
+
+    if (!define)
+      define = defineOnDeclare(aggrdecl);
   }
 
-  OutBuffer mangledName;
-  mangledName.writestring("TypeInfo_S");
-  mangleToBuffer(aggrdecl, &mangledName);
-  const auto length = mangledName.length();
-  mangledName.prependstring(("_D" + std::to_string(length)).c_str());
-  mangledName.writestring("6__initZ");
-
-  const auto irMangle = getIRMangledVarName(mangledName.peekChars(), LINKd);
-
-  // We need to keep the symbol mutable as the type is not declared as
-  // immutable on the D side, and e.g. synchronized() can be used on the
-  // implicit monitor.
-  typeInfo = declareGlobal(aggrdecl->loc, gIR->module,
-                           getTypeInfoStructMemType(), irMangle, false);
-
-  emitTypeInfoMetadata(typeInfo, aggrdecl->type);
+  if (define) {
+    auto init = getTypeInfoInit();
+    if (!typeInfo->hasInitializer())
+      defineGlobal(typeInfo, init, aggrdecl);
+  }
 
   return typeInfo;
 }
@@ -100,42 +107,6 @@ LLConstant *IrStruct::getTypeInfoInit() {
 
   // we need (dummy) TypeInfos for opaque structs too
   const bool isOpaque = !sd->members;
-
-  if (!isOpaque) {
-    DtoResolveStruct(sd);
-
-    if (TemplateInstance *ti = sd->isInstantiated()) {
-      if (!ti->needsCodegen()) {
-        assert(ti->minst || sd->requestTypeInfo);
-
-        // We won't emit ti, so emit the special member functions in here.
-        if (sd->xeq && sd->xeq != StructDeclaration::xerreq &&
-            sd->xeq->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->xeq);
-        }
-        if (sd->xcmp && sd->xcmp != StructDeclaration::xerrcmp &&
-            sd->xcmp->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->xcmp);
-        }
-        if (FuncDeclaration *ftostr = search_toString(sd)) {
-          if (ftostr->semanticRun >= PASSsemantic3)
-            Declaration_codegen(ftostr);
-        }
-        if (sd->xhash && sd->xhash->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->xhash);
-        }
-        if (sd->postblit && sd->postblit->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->postblit);
-        }
-        if (sd->dtor && sd->dtor->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->dtor);
-        }
-        if (sd->tidtor && sd->tidtor->semanticRun >= PASSsemantic3) {
-          Declaration_codegen(sd->tidtor);
-        }
-      }
-    }
-  }
 
   // string name
   if (isOpaque) {

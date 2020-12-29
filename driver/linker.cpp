@@ -11,6 +11,7 @@
 
 #include "dmd/errors.h"
 #include "driver/cl_options.h"
+#include "driver/timetrace.h"
 #include "driver/tool.h"
 #include "gen/llvm.h"
 #include "gen/logger.h"
@@ -202,10 +203,11 @@ bool useInternalLLDForLinking() {
   return linkInternally
 #if LDC_WITH_LLD
          ||
-         // DWARF debuginfos for MSVC require LLD
-         (opts::emitDwarfDebugInfo && linkInternally.getNumOccurrences() == 0 &&
-          opts::linker.empty() && !opts::isUsingLTO() &&
-          global.params.targetTriple->isWindowsMSVCEnvironment())
+         // MSVC: DWARF debuginfos and LTO require LLD
+         (linkInternally.getNumOccurrences() == 0 && // not explicitly disabled
+          opts::linker.empty() && // no explicitly selected linker
+          global.params.targetTriple->isWindowsMSVCEnvironment() &&
+          (opts::emitDwarfDebugInfo || opts::isUsingLTO()))
 #endif
       ;
 }
@@ -283,6 +285,7 @@ static std::string gExePath;
 
 int linkObjToBinary() {
   Logger::println("*** Linking executable ***");
+  TimeTraceScope timeScope("Linking executable");
 
   // remember output path for later
   gExePath = getOutputName();
@@ -309,6 +312,8 @@ void deleteExeFile() {
 //////////////////////////////////////////////////////////////////////////////
 
 int runProgram() {
+  TimeTraceScope timeScope("Run user program");
+
   assert(!gExePath.empty());
 
   // Run executable

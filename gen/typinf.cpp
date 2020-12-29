@@ -56,18 +56,16 @@
 #include <cassert>
 #include <cstdio>
 
-// defined in dmd/typinf.d:
-void genTypeInfo(Loc loc, Type *torig, Scope *sc);
-bool builtinTypeInfo(Type *t);
+void genTypeInfo(Loc loc, Type *torig, Scope *sc); // in dmd/typinf.d
 
-TypeInfoDeclaration *getOrCreateTypeInfoDeclaration(const Loc &loc, Type *torig,
-                                                    Scope *sc) {
-  IF_LOG Logger::println("Type::getTypeInfo(): %s", torig->toChars());
+TypeInfoDeclaration *getOrCreateTypeInfoDeclaration(const Loc &loc, Type *forType) {
+  IF_LOG Logger::println("getOrCreateTypeInfoDeclaration(): %s",
+                         forType->toChars());
   LOG_SCOPE
 
-  genTypeInfo(loc, torig, sc);
+  genTypeInfo(loc, forType, nullptr);
 
-  return torig->vtinfo;
+  return forType->vtinfo;
 }
 
 /* ========================================================================= */
@@ -88,38 +86,14 @@ void emitTypeInfoMetadata(LLGlobalVariable *typeinfoGlobal, Type *forType) {
       t->ty != Tident) {
     const auto metaname = getMetadataName(TD_PREFIX, typeinfoGlobal);
 
-    llvm::NamedMDNode *meta = gIR->module.getNamedMetadata(metaname);
-
-    if (!meta) {
-      // Construct the fields
-      llvm::Metadata *mdVals[TD_NumFields];
-      mdVals[TD_TypeInfo] = llvm::ValueAsMetadata::get(typeinfoGlobal);
-      mdVals[TD_Type] = llvm::ConstantAsMetadata::get(
-          llvm::UndefValue::get(DtoType(forType)));
-
+    if (!gIR->module.getNamedMetadata(metaname)) {
       // Construct the metadata and insert it into the module.
-      llvm::NamedMDNode *node = gIR->module.getOrInsertNamedMetadata(metaname);
-      node->addOperand(llvm::MDNode::get(
-          gIR->context(), llvm::makeArrayRef(mdVals, TD_NumFields)));
+      auto meta = gIR->module.getOrInsertNamedMetadata(metaname);
+      auto val = llvm::UndefValue::get(DtoType(forType));
+      meta->addOperand(llvm::MDNode::get(gIR->context(),
+                                         llvm::ConstantAsMetadata::get(val)));
     }
   }
-}
-
-void DtoResolveTypeInfo(TypeInfoDeclaration *tid) {
-  if (tid->ir->isResolved()) {
-    return;
-  }
-  tid->ir->setResolved();
-
-  // TypeInfo instances (except ClassInfo ones) are always emitted as weak
-  // symbols when they are used. We call semanticTypeInfo() to make sure
-  // that the type (e.g. for structs) is semantic3'd and codegen() does not
-  // skip it on grounds of being speculative, as DtoResolveTypeInfo() means
-  // that we actually need the value somewhere else in codegen.
-  // TODO: DMD does not seem to call semanticTypeInfo() from the glue layer,
-  // so there might be a structural issue somewhere.
-  semanticTypeInfo(nullptr, tid->tinfo);
-  Declaration_codegen(tid);
 }
 
 /* ========================================================================= */
@@ -316,7 +290,7 @@ public:
     RTTIBuilder b(getInterfaceTypeInfoType());
 
     // TypeInfo base
-    b.push_classinfo(tc->sym);
+    b.push_typeinfo(tc);
 
     // finish
     b.finalize(gvar);
@@ -340,7 +314,7 @@ public:
     LLType *tiTy = DtoType(getTypeInfoType());
 
     for (auto arg : *tu->arguments) {
-      arrInits.push_back(DtoTypeInfoOf(arg->type));
+      arrInits.push_back(DtoTypeInfoOf(decl->loc, arg->type));
     }
 
     // build array
@@ -451,28 +425,31 @@ void buildTypeInfo(TypeInfoDeclaration *decl) {
     Logger::println("typeinfo mangle: %s", mangled);
   }
 
-  // Only declare the symbol if it isn't yet, otherwise the subtype of
-  // built-in TypeInfos (rt.typeinfo.*) may clash with the base type when
-  // compiling the rt.typeinfo.* modules.
+  // Only declare the symbol if it isn't yet, otherwise it may clash with an
+  // existing init symbol of a built-in TypeInfo class (in rt.util.typeinfo)
+  // when compiling the rt.util.typeinfo unittests.
   const auto irMangle = getIRMangledVarName(mangled, LINKd);
   LLGlobalVariable *gvar = gIR->module.getGlobalVariable(irMangle);
-  if (!gvar) {
+  if (gvar) {
+    assert(builtinTypeInfo(forType) && "existing global expected to be the "
+                                       "init symbol of a built-in TypeInfo");
+  } else {
     LLType *type = DtoType(decl->type)->getPointerElementType();
     // We need to keep the symbol mutable as the type is not declared as
     // immutable on the D side, and e.g. synchronized() can be used on the
     // implicit monitor.
-    gvar = declareGlobal(decl->loc, gIR->module, type, irMangle, false);
-
-    emitTypeInfoMetadata(gvar, forType);
+    gvar = declareGlobal(decl->loc, gIR->module, type, irMangle,
+                         /*isConstant=*/false);
   }
+
+  emitTypeInfoMetadata(gvar, forType);
 
   IrGlobal *irg = getIrGlobal(decl, true);
   irg->value = gvar;
 
   // check if the definition can be elided
   if (gvar->hasInitializer() || !global.params.useTypeInfo ||
-      !Type::dtypeinfo || isSpeculativeType(forType) ||
-      builtinTypeInfo(forType)) {
+      !Type::dtypeinfo || builtinTypeInfo(forType)) {
     return;
   }
   if (auto forClassType = forType->isTypeClass()) {
@@ -493,26 +470,20 @@ class DeclareOrDefineVisitor : public Visitor {
 
   // Define struct TypeInfos as linkonce_odr in each referencing CU.
   void visit(TypeInfoStructDeclaration *decl) override {
-    auto forType = decl->tinfo->isTypeStruct();
-
-    auto irstruct = getIrAggr(forType->sym, true);
-    auto gvar = irstruct->getTypeInfoSymbol();
-
+    auto sd = decl->tinfo->isTypeStruct()->sym;
+    auto irstruct = getIrAggr(sd, true);
     IrGlobal *irg = getIrGlobal(decl, true);
-    irg->value = gvar;
+
+    auto ti = irstruct->getTypeInfoSymbol();
+    irg->value = ti;
 
     // check if the definition can be elided
-    if (gvar->hasInitializer() || irstruct->suppressTypeInfo() ||
-        isSpeculativeType(forType)) {
+    if (ti->hasInitializer() || irstruct->suppressTypeInfo()) {
       return;
     }
 
-    LLConstant *init = irstruct->getTypeInfoInit(); // might define gvar!
-
-    if (!gvar->hasInitializer()) {
-      defineGlobal(gvar, init, irstruct->aggrdecl);
-      gvar->setLinkage(TYPEINFO_LINKAGE_TYPE); // override
-    }
+    irstruct->getTypeInfoSymbol(/*define=*/true);
+    ti->setLinkage(TYPEINFO_LINKAGE_TYPE); // override
   }
 
   // Only declare class TypeInfos. They are defined once in their owning module
@@ -526,17 +497,22 @@ class DeclareOrDefineVisitor : public Visitor {
   }
 
   // Build all other TypeInfos.
-  void visit(TypeInfoDeclaration *decl) override {
-    buildTypeInfo(decl);
-  }
+  void visit(TypeInfoDeclaration *decl) override { buildTypeInfo(decl); }
 };
 } // anonymous namespace
 
-void TypeInfoDeclaration_codegen(TypeInfoDeclaration *decl) {
-  IF_LOG Logger::println("TypeInfoDeclaration_codegen(%s)",
-                         decl->toPrettyChars());
+LLGlobalVariable *DtoResolveTypeInfo(TypeInfoDeclaration *tid) {
+  IF_LOG Logger::println("DtoResolveTypeInfo(%s)", tid->toPrettyChars());
   LOG_SCOPE;
 
-  DeclareOrDefineVisitor v;
-  decl->accept(&v);
+  assert(!gIR->dcomputetarget);
+
+  if (!tid->ir->isResolved()) {
+    DeclareOrDefineVisitor v;
+    tid->accept(&v);
+
+    tid->ir->setResolved();
+  }
+
+  return llvm::cast<LLGlobalVariable>(getIrValue(tid));
 }
