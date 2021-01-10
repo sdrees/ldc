@@ -44,6 +44,11 @@ private:
 
   bool passPointerToHiddenCopy(Type *t, bool isReturnValue,
                                TypeFunction *tf) const {
+    return passPointerToHiddenCopy(t, isReturnValue, tf->linkage, tf);
+  }
+
+  bool passPointerToHiddenCopy(Type *t, bool isReturnValue, LINK linkage,
+                               TypeFunction *tf = nullptr) const {
     // 80-bit real/ireal:
     // * returned on the x87 stack (for DMD inline asm compliance and what LLVM
     //   defaults to)
@@ -51,7 +56,7 @@ private:
     if (isX87(t))
       return !isReturnValue;
 
-    const bool isMSVCpp = isMSVC && tf->linkage == LINKcpp;
+    const bool isMSVCpp = isMSVC && linkage == LINK::cpp;
 
     // Handle non-PODs:
     if (isReturnValue) {
@@ -77,7 +82,8 @@ private:
     }
 
     // __vectorcall: Homogeneous Vector Aggregates are passed in registers
-    if (isExternD(tf) && isHVA(t, hfvaToArray.maxElements))
+    const bool isD = tf ? isExternD(tf) : linkage == LINK::d;
+    if (isD && isHVA(t, hfvaToArray.maxElements))
       return false;
 
     // Remaining aggregates which can NOT be rewritten as integers (size > 8
@@ -100,13 +106,13 @@ public:
     // => let LLVM pass vectors in registers instead of passing a ref to a
     // hidden copy (both cases handled by LLVM automatically for LL vectors
     // which we don't rewrite).
-    return l == LINKd && !(tf && tf->parameterList.varargs == VARARGvariadic)
+    return l == LINK::d && !(tf && tf->parameterList.varargs == VARARGvariadic)
                ? llvm::CallingConv::X86_VectorCall
                : llvm::CallingConv::C;
   }
 
   std::string mangleFunctionForLLVM(std::string name, LINK l) override {
-    if (l == LINKd) {
+    if (l == LINK::d) {
       // Prepend a 0x1 byte to prevent LLVM from applying vectorcall/stdcall
       // mangling: _D… => _D…@<paramssize>
       name.insert(name.begin(), '\1');
@@ -121,7 +127,7 @@ public:
     Type *rt = tf->next->toBasetype();
 
     // for non-static member functions, MSVC++ enforces sret for all structs
-    if (isMSVC && tf->linkage == LINKcpp && needsThis && rt->ty == Tstruct) {
+    if (isMSVC && tf->linkage == LINK::cpp && needsThis && rt->ty == Tstruct) {
       return true;
     }
 
@@ -136,6 +142,12 @@ public:
     return passPointerToHiddenCopy(rt, /*isReturnValue=*/true, tf);
   }
 
+  // Prefer a ref if the POD cannot be passed in a register, i.e., if
+  // IndirectByvalRewrite would be applied.
+  bool preferPassByRef(Type *t) override {
+    return passPointerToHiddenCopy(t->toBasetype(), false, LINK::d);
+  }
+
   bool passByVal(TypeFunction *, Type *) override {
     // LLVM's byval attribute is not compatible with the Win64 ABI
     return false;
@@ -143,7 +155,7 @@ public:
 
   bool passThisBeforeSret(TypeFunction *tf) override {
     // required by MSVC++
-    return tf->linkage == LINKcpp;
+    return tf->linkage == LINK::cpp;
   }
 
   void rewriteFunctionType(IrFuncTy &fty) override {

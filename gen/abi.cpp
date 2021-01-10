@@ -85,7 +85,7 @@ TypeTuple *TargetABI::getArgTypes(Type *t) {
   // try to reuse cached argTypes of StructDeclarations
   if (auto ts = t->toBasetype()->isTypeStruct()) {
     auto sd = ts->sym;
-    if (sd->sizeok == SIZEOKdone)
+    if (sd->sizeok == Sizeok::done)
       return sd->argTypes;
   }
 
@@ -151,7 +151,15 @@ bool TargetABI::canRewriteAsInt(Type *t, bool include64bit) {
 }
 
 bool TargetABI::isExternD(TypeFunction *tf) {
-  return tf->linkage == LINKd && tf->parameterList.varargs != VARARGvariadic;
+  return tf->linkage == LINK::d && tf->parameterList.varargs != VARARGvariadic;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+bool TargetABI::preferPassByRef(Type *t) {
+  // simple base heuristic: use a ref for all types > 2 machine words
+  d_uns64 machineWordSize = global.params.is64bit ? 8 : 4;
+  return t->size() > 2 * machineWordSize;
 }
 
 //////////////////////////////////////////////////////////////////////////////

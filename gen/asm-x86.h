@@ -519,12 +519,9 @@ typedef enum {
   Opr_NoType = 0x80,
 } OprVals;
 
-typedef struct {
-} AsmOprInfo;
-
 typedef unsigned char Opr;
 
-typedef struct {
+struct AsmOpInfo {
   Opr operands[3];
 #ifndef ASM_X86_64
   unsigned char needsType : 3, implicitClobbers : 8, linkType : 2;
@@ -545,7 +542,7 @@ typedef struct {
     }
     return 3;
   }
-} AsmOpInfo;
+};
 
 typedef enum {
   Mn_fdisi,
@@ -858,10 +855,10 @@ static AsmOpInfo asmOpInfo[N_AsmOpInfo] = {
 #undef U
 #undef N
 
-typedef struct {
+struct AsmOpEnt {
   const char *inMnemonic;
   AsmOp asmOp;
-} AsmOpEnt;
+};
 
 /* Some opcodes have data size restrictions, which we don't check
 
@@ -2017,7 +2014,7 @@ static Expression *Handled;
 static Identifier *ident_seg;
 
 struct AsmProcessor {
-  typedef struct {
+  struct Operand {
     int inBracket;
     int hasBracket;
     int hasNumber;
@@ -2035,7 +2032,7 @@ struct AsmProcessor {
     OperandClass cls;
     PtrType dataSize;
     PtrType dataSizeHint; // DMD can use the type of a referenced variable
-  } Operand;
+  };
 
   static const unsigned Max_Operands = 3;
 
@@ -2325,7 +2322,7 @@ struct AsmProcessor {
     const auto &triple = *global.params.targetTriple;
     return triple.isOSDarwin() ||
            // Win32: all symbols except for MSVC++ ones
-           (triple.isOSWindows() && triple.isArch32Bit() && link != LINKcpp);
+           (triple.isOSWindows() && triple.isArch32Bit() && link != LINK::cpp);
   }
 
   void addOperand(const char *fmt, AsmArgType type, Expression *e,

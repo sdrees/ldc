@@ -147,7 +147,7 @@ task:
   timeout_in: 60m
   environment:
     CI_OS: osx
-    LLVM_VERSION: 11.0.0
+    LLVM_VERSION: 11.0.1
     # OS is preset to `darwin`
     OS: osx
     PATH: ${CIRRUS_WORKING_DIR}/../cmake/bin:${CIRRUS_WORKING_DIR}/../ninja:${CIRRUS_WORKING_DIR}/../llvm/bin:${PATH}
@@ -247,7 +247,7 @@ task:
     mkdir bin
     $DMD -w -de -dip1000 rdmd.d -of=bin/rdmd
     $DMD -w -de -dip1000 ddemangle.d -of=bin/ddemangle
-    $DMD -w -de -dip1000 DustMite/dustmite.d DustMite/splitter.d -of=bin/dustmite
+    $DMD -w -de -dip1000 DustMite/dustmite.d DustMite/splitter.d DustMite/polyhash.d -of=bin/dustmite
     cp bin/{rdmd,ddemangle,dustmite} ../installed/bin
   # Pack artifact
   pack_artifact_script: |

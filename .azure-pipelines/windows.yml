@@ -18,7 +18,7 @@ steps:
     echo on
     cd ..
     :: Download & extract libcurl
-    curl -L -o libcurl.7z https://github.com/ldc-developers/mingw-w64-libs/releases/download/v7.0.0/libcurl-7.69.1-zlib-static-ipv6-sspi-winssl.7z 2>&1
+    curl -L -o libcurl.7z https://github.com/ldc-developers/mingw-w64-libs/releases/download/v8.0.0/libcurl-7.74.0-zlib-static-ipv6-sspi-schannel.7z 2>&1
     mkdir libcurl
     cd libcurl
     7z x ../libcurl.7z > nul
@@ -205,7 +205,7 @@ steps:
     powershell -c "git checkout \"$(cat %BUILD_SOURCESDIRECTORY%/packaging/dlang-tools_version -Raw)\"" 2>&1
     %DMD% -w -de -dip1000 rdmd.d || exit /b
     %DMD% -w -de -dip1000 ddemangle.d || exit /b
-    %DMD% -w -de -dip1000 DustMite\dustmite.d DustMite\splitter.d || exit /b
+    %DMD% -w -de -dip1000 DustMite\dustmite.d DustMite\splitter.d DustMite\polyhash.d || exit /b
     cp *.exe ../installed/bin
   displayName: Build & copy dlang tools
 
