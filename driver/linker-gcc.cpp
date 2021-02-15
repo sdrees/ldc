@@ -647,11 +647,10 @@ void ArgsBuilder::addDefaultPlatformLibs() {
       args.push_back("-lunwind"); // for druntime backtrace
     }
     args.push_back("-lrt");
+    args.push_back("-ldl");
   // fallthrough
   case llvm::Triple::Darwin:
   case llvm::Triple::MacOSX:
-    args.push_back("-ldl");
-  // fallthrough
   case llvm::Triple::FreeBSD:
   case llvm::Triple::NetBSD:
   case llvm::Triple::OpenBSD:
@@ -746,13 +745,17 @@ int linkObjToBinaryGcc(llvm::StringRef outputPath,
 #endif
       );
     } else if (global.params.targetTriple->isOSBinFormatMachO()) {
+#if LDC_LLVM_VER >= 1200
+      success = lld::macho::link(fullArgs
+#else
       success = lld::mach_o::link(fullArgs
+#endif
 #if LDC_LLVM_VER >= 700
-                                  ,
-                                  CanExitEarly
+                                 ,
+                                 CanExitEarly
 #if LDC_LLVM_VER >= 1000
-                                  ,
-                                  llvm::outs(), llvm::errs()
+                                 ,
+                                 llvm::outs(), llvm::errs()
 #endif
 #endif
       );

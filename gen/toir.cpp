@@ -1093,10 +1093,9 @@ public:
     // evaluate the base expression but delay getting its pointer until the
     // potential bounds have been evaluated
     DValue *v = toElem(e->e1);
-    auto getBasePointer = [e, v, etype]() {
+    auto getBasePointer = [v, etype]() {
       if (etype->ty == Tpointer) {
         // pointer slicing
-        assert(e->lwr);
         return DtoRVal(v);
       } else {
         // array slice
@@ -2595,6 +2594,7 @@ public:
       // and store element-wise.
       if (auto ts = tsrc->isTypeSArray()) {
         Logger::println("static array expression");
+        (void)ts;
         assert(ts->dim->toInteger() == N &&
                "Static array vector initializer length mismatch, should have "
                "been handled in frontend.");
@@ -2621,7 +2621,9 @@ public:
       DValue *val = toElem(e->e1);
       LLValue *llElement = getCastElement(val);
       if (auto llConstant = isaConstant(llElement)) {
-#if LDC_LLVM_VER >= 1100
+#if LDC_LLVM_VER >= 1200
+        const auto elementCount = llvm::ElementCount::getFixed(N);
+#elif LDC_LLVM_VER >= 1100
         const auto elementCount = llvm::ElementCount(N, false);
 #else
         const auto elementCount = N;
